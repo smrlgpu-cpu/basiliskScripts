@@ -70,7 +70,7 @@ def createScenario():
     Uses global variables MC_CONTROLLER_TIMESTEP and MC_SIMULATION_TIME.
     """
     global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME
-    crtlDtNano = macros.sec2nano(MC_CTRL_DT)
+    ctrlDtNano = macros.sec2nano(MC_CTRL_DT)
     logDtNano = macros.sec2nano(MC_LOG_DT)
     simDtNano = macros.sec2nano(MC_SIM_DT)
     simTimeNano = macros.sec2nano(MC_SIM_TIME)
@@ -80,14 +80,17 @@ def createScenario():
     # Process and Task names
     dynTaskName = "dynTask"
     ctrlTaskName = "ctrlTask"
+    logTaskName = "logTask"
+
     simProcessName = "simProcess"
     
     # Create process - MUST attach to scSim to prevent GC
     scSim.dynProcess = scSim.CreateNewProcess(simProcessName)
     
     # Set Simulation Time Step (Dynamics) - Faster than controller
+    scSim.dynProcess.addTask(scSim.CreateNewTask(ctrlTaskName, ctrlDtNano))
+    scSim.dynProcess.addTask(scSim.CreateNewTask(logTaskName, logDtNano))
     scSim.dynProcess.addTask(scSim.CreateNewTask(dynTaskName, simDtNano))
-    scSim.dynProcess.addTask(scSim.CreateNewTask(ctrlTaskName, crtlDtNano))
 
     # --- 1. Spacecraft Setup ---
     scObject = spacecraft.Spacecraft()
@@ -123,10 +126,12 @@ def createScenario():
     
     # Basilisk uses [q0, q1, q2, q3] where q0 is scalar
     # Shoemake's result is a valid unit quaternion.
+    if q_rand[0] < 0:
+        q_rand = -q_rand
     
     # Convert to MRP for initialization
     scObject.hub.sigma_BNInit = rbk.EP2MRP(q_rand)
-    scObject.hub.omega_BN_BInit = [[0.], [0.], [0.]]
+    scObject.hub.omega_BN_BInit = np.random.uniform(-0.2, 0.2, size=(3, 1)).tolist()
 
     scSim.AddModelToTask(dynTaskName, scObject, 1)
     
@@ -265,19 +270,19 @@ def createScenario():
     # --- 4. Navigation & Control ---
     scSim.sNavObject = simpleNav.SimpleNav()
     scSim.sNavObject.ModelTag = "SimpleNavigation"
-    scSim.AddModelToTask(dynTaskName, scSim.sNavObject)
+    scSim.AddModelToTask(ctrlTaskName, scSim.sNavObject)
     scSim.sNavObject.scStateInMsg.subscribeTo(scObject.scStateOutMsg)
 
     # Target Attitude
     scSim.inertial3DObj = inertial3D.inertial3D()
     scSim.inertial3DObj.ModelTag = "inertial3D"
-    scSim.AddModelToTask(dynTaskName, scSim.inertial3DObj)
+    scSim.AddModelToTask(ctrlTaskName, scSim.inertial3DObj)
     scSim.inertial3DObj.sigma_R0N = [0., 0., 0.]
 
     # Attitude Error
     attError = attTrackingError.attTrackingError()
     attError.ModelTag = "attErrorInertial3D"
-    scSim.AddModelToTask(dynTaskName, attError)
+    scSim.AddModelToTask(ctrlTaskName, attError)
     attError.attNavInMsg.subscribeTo(scSim.sNavObject.attOutMsg)
     attError.attRefInMsg.subscribeTo(scSim.inertial3DObj.attRefOutMsg)
     
@@ -316,11 +321,11 @@ def createScenario():
     # 1. Attitude Error Recorder
     # Key name must match the name used in RetentionPolicy.addMessageLog
     scSim.msgRecList["attError.attGuidOutMsg"] = scSim.attError.attGuidOutMsg.recorder(logDtNano)
-    scSim.AddModelToTask(dynTaskName, scSim.msgRecList["attError.attGuidOutMsg"])
+    scSim.AddModelToTask(logTaskName, scSim.msgRecList["attError.attGuidOutMsg"])
     
     # 2. Control Torque Recorder
     scSim.msgRecList["rngControl.cmdTorqueOutMsg"] = scSim.rngControl.cmdTorqueOutMsg.recorder(logDtNano)
-    scSim.AddModelToTask(dynTaskName, scSim.msgRecList["rngControl.cmdTorqueOutMsg"])
+    scSim.AddModelToTask(logTaskName, scSim.msgRecList["rngControl.cmdTorqueOutMsg"])
     
     # Store simulation time and sampling time for executeScenario
     scSim.simulationTime = simTimeNano
