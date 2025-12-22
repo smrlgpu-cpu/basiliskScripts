@@ -42,8 +42,10 @@ bskPath = __path__[0]
 fileName = os.path.basename(os.path.splitext(__file__)[0])
 
 # Module-level global variables for Monte Carlo (to avoid functools.partial pickling issues)
-MC_CONTROLLER_TIMESTEP = 0.01
-MC_SIMULATION_TIME = 100.0
+MC_CTRL_DT = 1.0
+MC_LOG_DT = 0.1
+MC_SIM_DT = 0.01
+MC_SIM_TIME = 100.0
 
 # Helper function to compute dcm_F0B from normal vector (must be at module level for pickling)
 def normalToDcmF0B(nHat_B):
@@ -67,22 +69,25 @@ def createScenario():
     Creates the simulation scenario for Monte Carlo runs.
     Uses global variables MC_CONTROLLER_TIMESTEP and MC_SIMULATION_TIME.
     """
-    global MC_CONTROLLER_TIMESTEP, MC_SIMULATION_TIME
-    controller_timestep = MC_CONTROLLER_TIMESTEP
-    simulation_time = MC_SIMULATION_TIME
+    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME
+    crtlDtNano = macros.sec2nano(MC_CTRL_DT)
+    logDtNano = macros.sec2nano(MC_LOG_DT)
+    simDtNano = macros.sec2nano(MC_SIM_DT)
+    simTimeNano = macros.sec2nano(MC_SIM_TIME)
     # Create simulation container
     scSim = SimulationBaseClass.SimBaseClass()
     
     # Process and Task names
-    simTaskName = "simTask"
+    dynTaskName = "dynTask"
+    ctrlTaskName = "ctrlTask"
     simProcessName = "simProcess"
     
     # Create process - MUST attach to scSim to prevent GC
     scSim.dynProcess = scSim.CreateNewProcess(simProcessName)
     
     # Set Simulation Time Step (Dynamics) - Faster than controller
-    simulationTimeStep = macros.sec2nano(0.01) # 10ms for physics
-    scSim.dynProcess.addTask(scSim.CreateNewTask(simTaskName, simulationTimeStep))
+    scSim.dynProcess.addTask(scSim.CreateNewTask(dynTaskName, simDtNano))
+    scSim.dynProcess.addTask(scSim.CreateNewTask(ctrlTaskName, crtlDtNano))
 
     # --- 1. Spacecraft Setup ---
     scObject = spacecraft.Spacecraft()
@@ -123,7 +128,7 @@ def createScenario():
     scObject.hub.sigma_BNInit = rbk.EP2MRP(q_rand)
     scObject.hub.omega_BN_BInit = [[0.], [0.], [0.]]
 
-    scSim.AddModelToTask(simTaskName, scObject, 1)
+    scSim.AddModelToTask(dynTaskName, scObject, 1)
     
     # Save scObject to scSim for MC dispersion
     scSim.scObject = scObject
@@ -145,7 +150,7 @@ def createScenario():
     timeInitString = '2025 DECEMBER 09 00:00:00.0'
     scSim.spiceObject = scSim.gravFactory.createSpiceInterface(time=timeInitString, epochInMsg=True)
     scSim.spiceObject.zeroBase = 'Earth'
-    scSim.AddModelToTask(simTaskName, scSim.gravFactory.spiceObject, 2)
+    scSim.AddModelToTask(dynTaskName, scSim.gravFactory.spiceObject, 2)
     
     scSim.atmo = exponentialAtmosphere.ExponentialAtmosphere()
     scSim.atmo.ModelTag = "exponentialAtmosphere"
@@ -153,7 +158,7 @@ def createScenario():
     scSim.atmo.scaleHeight = 7200.0
     scSim.atmo.baseDensity = 1.217
     scSim.atmo.addSpacecraftToModel(scObject.scStateOutMsg)
-    scSim.AddModelToTask(simTaskName, scSim.atmo)
+    scSim.AddModelToTask(dynTaskName, scSim.atmo)
 
     # --- 3. Disturbances ---
     # Drag
@@ -180,7 +185,7 @@ def createScenario():
     
     scSim.dragEffector.atmoDensInMsg.subscribeTo(scSim.atmo.envOutMsgs[0])
     scObject.addDynamicEffector(scSim.dragEffector)
-    scSim.AddModelToTask(simTaskName, scSim.dragEffector)
+    scSim.AddModelToTask(dynTaskName, scSim.dragEffector)
 
     # SRP
     scSim.srpEffector = facetSRPDynamicEffector.FacetSRPDynamicEffector()
@@ -210,14 +215,14 @@ def createScenario():
                             panelDiffuseCoeff, panelSpecularCoeff)
         
     scObject.addDynamicEffector(scSim.srpEffector)
-    scSim.AddModelToTask(simTaskName, scSim.srpEffector)
+    scSim.AddModelToTask(dynTaskName, scSim.srpEffector)
 
     # Gravity Gradient
     scSim.ggEffector = GravityGradientEffector.GravityGradientEffector()
     scSim.ggEffector.ModelTag = "GravityGradient"
     scSim.ggEffector.addPlanetName(scSim.earth.planetName)
     scObject.addDynamicEffector(scSim.ggEffector)
-    scSim.AddModelToTask(simTaskName, scSim.ggEffector)
+    scSim.AddModelToTask(dynTaskName, scSim.ggEffector)
 
     # Sloshing (Fuel Tank)
     # Using defaults from scenarioAttitudeVisualization.py: useSloshing=False
@@ -260,19 +265,19 @@ def createScenario():
     # --- 4. Navigation & Control ---
     scSim.sNavObject = simpleNav.SimpleNav()
     scSim.sNavObject.ModelTag = "SimpleNavigation"
-    scSim.AddModelToTask(simTaskName, scSim.sNavObject)
+    scSim.AddModelToTask(dynTaskName, scSim.sNavObject)
     scSim.sNavObject.scStateInMsg.subscribeTo(scObject.scStateOutMsg)
 
     # Target Attitude
     scSim.inertial3DObj = inertial3D.inertial3D()
     scSim.inertial3DObj.ModelTag = "inertial3D"
-    scSim.AddModelToTask(simTaskName, scSim.inertial3DObj)
+    scSim.AddModelToTask(dynTaskName, scSim.inertial3DObj)
     scSim.inertial3DObj.sigma_R0N = [0., 0., 0.]
 
     # Attitude Error
     attError = attTrackingError.attTrackingError()
     attError.ModelTag = "attErrorInertial3D"
-    scSim.AddModelToTask(simTaskName, attError)
+    scSim.AddModelToTask(dynTaskName, attError)
     attError.attNavInMsg.subscribeTo(scSim.sNavObject.attOutMsg)
     attError.attRefInMsg.subscribeTo(scSim.inertial3DObj.attRefOutMsg)
     
@@ -284,7 +289,7 @@ def createScenario():
     scSim.rngControl.ModelTag = "randomTorque"
     scSim.rngControl.setTorqueMagnitude(5)
     
-    scSim.AddModelToTask(simTaskName, scSim.rngControl)
+    scSim.AddModelToTask(ctrlTaskName, scSim.rngControl)
     
     # Connections
     scSim.vehicleConfigOut = messaging.VehicleConfigMsgPayload(ISCPntB_B=I)
@@ -297,8 +302,8 @@ def createScenario():
     scSim.ctrlFTObject = extForceTorque.ExtForceTorque()
     scSim.ctrlFTObject.ModelTag = "controlForceTorque"
     scObject.addDynamicEffector(scSim.ctrlFTObject)
-    scSim.AddModelToTask(simTaskName, scSim.ctrlFTObject)
-    
+    scSim.AddModelToTask(dynTaskName, scSim.ctrlFTObject)
+     
     scSim.ctrlFTObject.cmdTorqueInMsg.subscribeTo(scSim.rngControl.cmdTorqueOutMsg)
     
     # Save for Retention
@@ -308,45 +313,37 @@ def createScenario():
     # Monte Carlo RetentionPolicy expects recorders to be in scSim.msgRecList
     scSim.msgRecList = {}
     
-    # Log rate
-    samplingTime = macros.sec2nano(controller_timestep)
-    
     # 1. Attitude Error Recorder
     # Key name must match the name used in RetentionPolicy.addMessageLog
-    scSim.msgRecList["attError.attGuidOutMsg"] = scSim.attError.attGuidOutMsg.recorder(samplingTime)
-    scSim.AddModelToTask(simTaskName, scSim.msgRecList["attError.attGuidOutMsg"])
+    scSim.msgRecList["attError.attGuidOutMsg"] = scSim.attError.attGuidOutMsg.recorder(logDtNano)
+    scSim.AddModelToTask(dynTaskName, scSim.msgRecList["attError.attGuidOutMsg"])
     
     # 2. Control Torque Recorder
-    scSim.msgRecList["rngControl.cmdTorqueOutMsg"] = scSim.rngControl.cmdTorqueOutMsg.recorder(samplingTime)
-    scSim.AddModelToTask(simTaskName, scSim.msgRecList["rngControl.cmdTorqueOutMsg"])
+    scSim.msgRecList["rngControl.cmdTorqueOutMsg"] = scSim.rngControl.cmdTorqueOutMsg.recorder(logDtNano)
+    scSim.AddModelToTask(dynTaskName, scSim.msgRecList["rngControl.cmdTorqueOutMsg"])
     
     # Store simulation time and sampling time for executeScenario
-    scSim.simulationTime = macros.sec2nano(simulation_time)
-    scSim.samplingTime = samplingTime
+    scSim.simulationTime = simTimeNano
+    scSim.samplingTime = logDtNano
     
     return scSim
 
 def executeScenario(sim):
     # print(f"DEBUG: Initializing simulation...") 
     sim.InitializeSimulation()
-    
-    # Extend simulation time by one sampling step to ensure the endpoint (100.00s) is recorded
-    stop_time = sim.simulationTime + sim.samplingTime
-    # print(f"DEBUG: Configuring stop time: {stop_time} ns")
-    sim.ConfigureStopTime(stop_time)
-    
-    # print(f"DEBUG: Starting execution...")
+    sim.ConfigureStopTime(sim.simulationTime)
     sim.ExecuteSimulation()
-    # print(f"DEBUG: Execution finished.")
 
-def run_mc_generation(num_runs, controller_timestep, simulation_time, num_threads=4):
+def run_mc_generation(*, num_runs: int, ctrlDt: float, logDt: float, simDt: float, simTime: float, num_threads: int = 4):
     # Suppress Basilisk INFO messages (only show WARNING and above)
     bskLogging.setDefaultLogLevel(bskLogging.BSK_WARNING)
     
     # Set global variables for createScenario (avoid functools.partial pickling issues)
-    global MC_CONTROLLER_TIMESTEP, MC_SIMULATION_TIME
-    MC_CONTROLLER_TIMESTEP = controller_timestep
-    MC_SIMULATION_TIME = simulation_time
+    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME
+    MC_CTRL_DT = ctrlDt
+    MC_LOG_DT = logDt
+    MC_SIM_DT = simDt
+    MC_SIM_TIME = simTime
     
     # Setup directories
     # 1. Monte Carlo Archive Directory: data/experiments/{fileName}/{datetime}
@@ -378,8 +375,8 @@ def run_mc_generation(num_runs, controller_timestep, simulation_time, num_thread
 
     # Retention Policy
     retentionPolicy = RetentionPolicy()
-    sampling_time_ns = macros.sec2nano(controller_timestep)
-    retentionPolicy.logRate = sampling_time_ns
+    logDtNano = macros.sec2nano(logDt)
+    retentionPolicy.logRate = logDtNano
     
     # Messages to log
     retentionPolicy.addMessageLog("attError.attGuidOutMsg", ["sigma_BR", "omega_BR_B"])
@@ -394,7 +391,7 @@ def run_mc_generation(num_runs, controller_timestep, simulation_time, num_thread
         print(f"Failed runs: {failures}")
         
     # Data Collection & HDF5 Saving
-    h5_filename = f"{datetimeStr}_{num_runs}_{controller_timestep}.h5"
+    h5_filename = f"{datetimeStr}_{num_runs}_{ctrlDt}.h5"
     h5_path = os.path.join(rawBaseDir, h5_filename)
     
     print(f"Saving data to {h5_path}...")
@@ -454,28 +451,37 @@ if __name__ == "__main__":
     parser.add_argument(
         '--num-runs',
         type=int,
-        default=10,
+        default=1000,
         help='Number of Monte Carlo simulation runs (sequences)'
     )
-    
     parser.add_argument(
-        '--controller-timestep',
+        '--ctrl-dt',
+        type=float,
+        default=1.0,
+        help='Controller timestep in seconds (default: 1.0s)'
+    )
+    parser.add_argument(
+        '--log-dt',
+        type=float,
+        default=0.1,
+        help='Logging timestep in seconds (default: 0.1s)'
+    )
+    parser.add_argument(
+        '--sim-dt',
         type=float,
         default=0.01,
-        help='Controller and logging timestep in seconds (e.g., 0.01 for 100Hz)'
+        help='Simulation timestep in seconds (default: 0.01s)'
     )
-    
     parser.add_argument(
-        '--simulation-time',
+        '--sim-time',
         type=float,
-        default=100.0,
-        help='Total simulation time for each sequence in seconds'
+        default=1000.0,
+        help='Total simulation time for each sequence in seconds (default: 100.0s)'
     )
-    
     parser.add_argument(
         '--threads',
         type=int,
-        default=4,
+        default=16,
         help='Number of parallel threads for Monte Carlo execution'
     )
     
@@ -484,9 +490,18 @@ if __name__ == "__main__":
     # Run data generation
     print(f"Starting data generation with:")
     print(f"  - Number of runs: {args.num_runs}")
-    print(f"  - Controller timestep: {args.controller_timestep}s ({1/args.controller_timestep:.1f}Hz)")
-    print(f"  - Simulation time: {args.simulation_time}s")
+    print(f"  - Controller timestep: {args.ctrl_dt}s ")
+    print(f"  - Logging timestep: {args.log_dt}s ")
+    print(f"  - Simulation timestep: {args.sim_dt}s ")
+    print(f"  - Simulation time: {args.sim_time}s")
     print(f"  - Parallel threads: {args.threads}")
     print()
     
-    run_mc_generation(args.num_runs, args.controller_timestep, args.simulation_time, args.threads)
+    run_mc_generation(
+        num_runs=args.num_runs, 
+        ctrlDt=args.ctrl_dt, 
+        logDt=args.log_dt, 
+        simDt=args.sim_dt, 
+        simTime=args.sim_time, 
+        num_threads=args.threads
+    )

@@ -123,21 +123,8 @@ dmypy.json
 .pyre/
 
 # Project-specific
+data/experiments/
 data/raw/
-data/processed/
-data/stats/
-exp/
-outputs/
-checkpoints/
-logs/
-*.h5
-*.hdf5
-*.pth
-*.pt
-*.ckpt
-wandb/
-tensorboard/
-lightning_logs/
 
 # IDE
 .vscode/
