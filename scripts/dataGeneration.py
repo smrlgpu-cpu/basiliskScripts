@@ -45,7 +45,7 @@ fileName = os.path.basename(os.path.splitext(__file__)[0])
 MC_CTRL_DT = 1.0
 MC_LOG_DT = 0.1
 MC_SIM_DT = 0.01
-MC_SIM_TIME = 100.0
+MC_SIM_TIME = 1000.0
 
 # Helper function to compute dcm_F0B from normal vector (must be at module level for pickling)
 def normalToDcmF0B(nHat_B):
@@ -78,6 +78,7 @@ def createScenario():
     scSim = SimulationBaseClass.SimBaseClass()
     
     # Process and Task names
+    navTaskName = "navTask"
     dynTaskName = "dynTask"
     ctrlTaskName = "ctrlTask"
     logTaskName = "logTask"
@@ -88,6 +89,7 @@ def createScenario():
     scSim.dynProcess = scSim.CreateNewProcess(simProcessName)
     
     # Set Simulation Time Step (Dynamics) - Faster than controller
+    scSim.dynProcess.addTask(scSim.CreateNewTask(navTaskName, logDtNano))
     scSim.dynProcess.addTask(scSim.CreateNewTask(ctrlTaskName, ctrlDtNano))
     scSim.dynProcess.addTask(scSim.CreateNewTask(logTaskName, logDtNano))
     scSim.dynProcess.addTask(scSim.CreateNewTask(dynTaskName, simDtNano))
@@ -270,19 +272,19 @@ def createScenario():
     # --- 4. Navigation & Control ---
     scSim.sNavObject = simpleNav.SimpleNav()
     scSim.sNavObject.ModelTag = "SimpleNavigation"
-    scSim.AddModelToTask(ctrlTaskName, scSim.sNavObject)
+    scSim.AddModelToTask(navTaskName, scSim.sNavObject)
     scSim.sNavObject.scStateInMsg.subscribeTo(scObject.scStateOutMsg)
 
     # Target Attitude
     scSim.inertial3DObj = inertial3D.inertial3D()
     scSim.inertial3DObj.ModelTag = "inertial3D"
-    scSim.AddModelToTask(ctrlTaskName, scSim.inertial3DObj)
+    scSim.AddModelToTask(navTaskName, scSim.inertial3DObj)
     scSim.inertial3DObj.sigma_R0N = [0., 0., 0.]
 
     # Attitude Error
     attError = attTrackingError.attTrackingError()
     attError.ModelTag = "attErrorInertial3D"
-    scSim.AddModelToTask(ctrlTaskName, attError)
+    scSim.AddModelToTask(navTaskName, attError)
     attError.attNavInMsg.subscribeTo(scSim.sNavObject.attOutMsg)
     attError.attRefInMsg.subscribeTo(scSim.inertial3DObj.attRefOutMsg)
     
@@ -481,7 +483,7 @@ if __name__ == "__main__":
         '--sim-time',
         type=float,
         default=1000.0,
-        help='Total simulation time for each sequence in seconds (default: 100.0s)'
+        help='Total simulation time for each sequence in seconds (default: 1000.0s)'
     )
     parser.add_argument(
         '--threads',
