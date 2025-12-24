@@ -46,6 +46,7 @@ MC_CTRL_DT = 1.0
 MC_LOG_DT = 0.1
 MC_SIM_DT = 0.01
 MC_SIM_TIME = 1000.0
+MC_USE_SLOSHING = False
 
 # Helper function to compute dcm_F0B from normal vector (must be at module level for pickling)
 def normalToDcmF0B(nHat_B):
@@ -69,7 +70,7 @@ def createScenario():
     Creates the simulation scenario for Monte Carlo runs.
     Uses global variables MC_CONTROLLER_TIMESTEP and MC_SIMULATION_TIME.
     """
-    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME
+    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME, MC_USE_SLOSHING
     ctrlDtNano = macros.sec2nano(MC_CTRL_DT)
     logDtNano = macros.sec2nano(MC_LOG_DT)
     simDtNano = macros.sec2nano(MC_SIM_DT)
@@ -209,7 +210,7 @@ def createScenario():
         nHat_F = np.array([0.0, 1.0, 0.0])  # F frame +Y = 법선
         rotHat_F = np.array([0.0, 0.0, 0.0])  # 회전 없음
         scSim.srpEffector.addFacet(hubArea, dcm_F0B, nHat_F, rotHat_F, location, 
-                            hubDiffuseCoeff, hubSpecularCoeff)
+                                    hubDiffuseCoeff, hubSpecularCoeff)
                             
     # 3.2.2. 태양광 패널 4면
     panelDiffuseCoeff = 0.16
@@ -219,7 +220,7 @@ def createScenario():
         nHat_F = np.array([0.0, 1.0, 0.0])
         rotHat_F = np.array([0.0, 0.0, 0.0])
         scSim.srpEffector.addFacet(panelArea, dcm_F0B, nHat_F, rotHat_F, loc,
-                            panelDiffuseCoeff, panelSpecularCoeff)
+                                    panelDiffuseCoeff, panelSpecularCoeff)
         
     scObject.addDynamicEffector(scSim.srpEffector)
     scSim.AddModelToTask(dynTaskName, scSim.srpEffector)
@@ -231,10 +232,8 @@ def createScenario():
     scObject.addDynamicEffector(scSim.ggEffector)
     scSim.AddModelToTask(dynTaskName, scSim.ggEffector)
 
-    # Sloshing (Fuel Tank)
-    # Using defaults from scenarioAttitudeVisualization.py: useSloshing=False
-    useSloshing = False 
-    
+    useSloshing = MC_USE_SLOSHING
+
     scSim.tank = fuelTank.FuelTank()
     scSim.tankModel = fuelTank.FuelTankModelConstantVolume()
     scSim.tankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
@@ -294,7 +293,7 @@ def createScenario():
     # Random Torque Control
     scSim.rngControl = randomTorque.RandomTorque()
     scSim.rngControl.ModelTag = "randomTorque"
-    scSim.rngControl.setTorqueMagnitude(5)
+    scSim.rngControl.setTorqueMagnitude(1)
     
     scSim.AddModelToTask(ctrlTaskName, scSim.rngControl)
     
@@ -310,7 +309,7 @@ def createScenario():
     scSim.ctrlFTObject.ModelTag = "controlForceTorque"
     scObject.addDynamicEffector(scSim.ctrlFTObject)
     scSim.AddModelToTask(dynTaskName, scSim.ctrlFTObject)
-     
+      
     scSim.ctrlFTObject.cmdTorqueInMsg.subscribeTo(scSim.rngControl.cmdTorqueOutMsg)
     
     # Save for Retention
@@ -341,23 +340,71 @@ def executeScenario(sim):
     sim.ConfigureStopTime(sim.simulationTime)
     sim.ExecuteSimulation()
 
-def run_mc_generation(*, num_runs: int, ctrlDt: float, logDt: float, simDt: float, simTime: float, num_threads: int = 4):
+def check_for_nans(data):
+    """
+    Checks if the Monte Carlo data dictionary contains any NaN values.
+    data format: {"messages": {"varName": np.array([[time, val1...], ...])}}
+    """
+    if "messages" not in data:
+        return False
+    
+    for key, val in data["messages"].items():
+        if np.isnan(val).any():
+            return True
+    return False
+
+def run_single_retry():
+    """
+    Manually runs a single simulation (outside of MC controller) to replace a failed/NaN run.
+    Because createScenario() uses random initialization, this provides new initial values.
+    Returns: A dictionary formatted exactly like monteCarlo.getRetainedData(i).
+    """
+    # 1. Create a fresh scenario (Random initialization happens here)
+    sim = createScenario()
+    
+    # 2. Execute
+    executeScenario(sim)
+    
+    # 3. Manually extract data to match MC RetentionPolicy format
+    # MC format: data["messages"]["key"] = numpy array with [time, data...]
+    messages = {}
+    
+    # Extract attError.attGuidOutMsg (sigma_BR and omega_BR_B)
+    # Note: We need to pull the specific variables recorded
+    rec_att = sim.msgRecList["attError.attGuidOutMsg"]
+    times = rec_att.times() # nanoseconds
+    
+    # Basilisk recorders return data. We need to prepend time.
+    sigma_BR = unitTestSupport.addTimeColumn(times, rec_att.sigma_BR)
+    omega_BR_B = unitTestSupport.addTimeColumn(times, rec_att.omega_BR_B)
+    
+    messages["attError.attGuidOutMsg.sigma_BR"] = sigma_BR
+    messages["attError.attGuidOutMsg.omega_BR_B"] = omega_BR_B
+    
+    # Extract rngControl.cmdTorqueOutMsg (torqueRequestBody)
+    rec_trq = sim.msgRecList["rngControl.cmdTorqueOutMsg"]
+    torque = unitTestSupport.addTimeColumn(rec_trq.times(), rec_trq.torqueRequestBody)
+    
+    messages["rngControl.cmdTorqueOutMsg.torqueRequestBody"] = torque
+    
+    return {"messages": messages}
+
+def run_mc_generation(*, numRuns: int, ctrlDt: float, logDt: float, simDt: float, simTime: float, numThreads: int = 4, useSloshing: bool = False):
     # Suppress Basilisk INFO messages (only show WARNING and above)
     bskLogging.setDefaultLogLevel(bskLogging.BSK_WARNING)
     
     # Set global variables for createScenario (avoid functools.partial pickling issues)
-    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME
+    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME, MC_USE_SLOSHING
     MC_CTRL_DT = ctrlDt
     MC_LOG_DT = logDt
     MC_SIM_DT = simDt
     MC_SIM_TIME = simTime
+    MC_USE_SLOSHING = useSloshing
     
     # Setup directories
-    # 1. Monte Carlo Archive Directory: data/experiments/{fileName}/{datetime}
     experimentBaseDir = os.path.join("data", "experiments", fileName)
     os.makedirs(experimentBaseDir, exist_ok=True)
     
-    # 2. HDF5 Output Directory: data/raw
     rawBaseDir = os.path.join("data", "raw")
     os.makedirs(rawBaseDir, exist_ok=True)
     
@@ -365,40 +412,37 @@ def run_mc_generation(*, num_runs: int, ctrlDt: float, logDt: float, simDt: floa
     
     # Monte Carlo Controller
     monteCarlo = Controller()
-    # Pass the function directly (no functools.partial, uses global variables)
     monteCarlo.setSimulationFunction(createScenario)
     monteCarlo.setExecutionFunction(executeScenario)
-    monteCarlo.setExecutionCount(num_runs)
+    monteCarlo.setExecutionCount(numRuns)
     monteCarlo.setShouldDisperseSeeds(True)
-    monteCarlo.setThreadCount(num_threads)
+    monteCarlo.setThreadCount(numThreads)
     monteCarlo.setVerbose(False)
-    monteCarlo.setShowProgressBar(True)  # Show progress bar
+    monteCarlo.setShowProgressBar(True)
     monteCarlo.setArchiveDir(os.path.join(experimentBaseDir, datetimeStr))
     
-    # Dispersions
-    # We remove explicit addDispersion calls since we handle random initialization 
-    # directly inside createScenario using numpy random functions.
-    # The MonteCarlo Controller ensures reproducibility by setting unique seeds for each run.
-
     # Retention Policy
     retentionPolicy = RetentionPolicy()
     logDtNano = macros.sec2nano(logDt)
     retentionPolicy.logRate = logDtNano
     
-    # Messages to log
     retentionPolicy.addMessageLog("attError.attGuidOutMsg", ["sigma_BR", "omega_BR_B"])
     retentionPolicy.addMessageLog("rngControl.cmdTorqueOutMsg", ["torqueRequestBody"])
     
     monteCarlo.addRetentionPolicy(retentionPolicy)
     
     # Execute
-    print(f"Starting Monte Carlo simulation with {num_runs} runs...")
+    print(f"Starting Monte Carlo simulation with {numRuns} runs...")
     failures = monteCarlo.executeSimulations()
     if failures:
-        print(f"Failed runs: {failures}")
+        print(f"Failed runs reported by MC controller: {failures}")
         
     # Data Collection & HDF5 Saving
-    h5_filename = f"{datetimeStr}_{num_runs}_{ctrlDt}.h5"
+    ctrlSeqLen = int(round(simTime / ctrlDt))
+    if not useSloshing:
+        h5_filename = f"attitude_{numRuns}_{ctrlSeqLen}_{logDt}.h5"
+    else:
+        h5_filename = f"sloshing_{numRuns}_{ctrlSeqLen}_{logDt}.h5"
     h5_path = os.path.join(rawBaseDir, h5_filename)
     
     print(f"Saving data to {h5_path}...")
@@ -406,20 +450,34 @@ def run_mc_generation(*, num_runs: int, ctrlDt: float, logDt: float, simDt: floa
     with h5py.File(h5_path, 'w') as f:
         grp_ts = f.create_group("timeseries")
         
-        for i in range(num_runs):
+        for i in range(numRuns):
+            # Retrieve data from MC archive
             data = monteCarlo.getRetainedData(i)
             
-            # Sequence ID group
+            # --- NaN Check & Retry Logic ---
+            retry_count = 0
+            max_retries = 10  # Prevent infinite loops
+            
+            while check_for_nans(data) and retry_count < max_retries:
+                print(f"WARNING: NaN detected in Run {i}. Retrying with new initialization (Attempt {retry_count + 1})...")
+                
+                # Run a single clean simulation manually
+                data = run_single_retry()
+                
+                retry_count += 1
+                
+            if check_for_nans(data):
+                print(f"ERROR: Run {i} failed to produce clean data after {max_retries} retries. Saving dirty data.")
+            # -------------------------------
+            
             grp_seq = grp_ts.create_group(f"sequence_{i}")
             
             # Extract data
-            # Basilisk saves message data as [time, val1, val2, ...]
             sigma_mrp_data = data["messages"]["attError.attGuidOutMsg.sigma_BR"][:, 1:]
             omega = data["messages"]["attError.attGuidOutMsg.omega_BR_B"][:, 1:]
             torque = data["messages"]["rngControl.cmdTorqueOutMsg.torqueRequestBody"][:, 1:]
             
             # Convert MRP to Quaternion (EP)
-            # rbk.MRP2EP handles 1D array. We need to convert for each time step.
             num_steps = sigma_mrp_data.shape[0]
             quaternion_data = np.zeros((num_steps, 4))
             
@@ -429,16 +487,15 @@ def run_mc_generation(*, num_runs: int, ctrlDt: float, logDt: float, simDt: floa
             # Combine state: [quaternion (4), omega (3)]
             state = np.hstack((quaternion_data, omega))
             
-            # Handle torque length mismatch (pad with zeros if shorter)
+            # Handle torque length mismatch
             if torque.shape[0] < state.shape[0]:
                 diff = state.shape[0] - torque.shape[0]
                 padding = np.zeros((diff, 3))
                 torque = np.vstack((torque, padding))
             elif torque.shape[0] > state.shape[0]:
-                 # In case torque is longer (rare), align with state
                 torque = torque[:state.shape[0]]
             
-            # Save datasets with float32 dtype
+            # Save datasets
             grp_seq.create_dataset("state", data=state, dtype=np.float32)
             grp_seq.create_dataset("control_torque", data=torque, dtype=np.float32)
             
@@ -491,7 +548,11 @@ if __name__ == "__main__":
         default=16,
         help='Number of parallel threads for Monte Carlo execution'
     )
-    
+    parser.add_argument(
+        '--use-sloshing',
+        action='store_true',
+        help='Use sloshing disturbance'
+    )
     args = parser.parse_args()
     
     # Run data generation
@@ -505,10 +566,11 @@ if __name__ == "__main__":
     print()
     
     run_mc_generation(
-        num_runs=args.num_runs, 
+        numRuns=args.num_runs, 
         ctrlDt=args.ctrl_dt, 
         logDt=args.log_dt, 
         simDt=args.sim_dt, 
         simTime=args.sim_time, 
-        num_threads=args.threads
+        numThreads=args.threads,
+        useSloshing=args.use_sloshing
     )
