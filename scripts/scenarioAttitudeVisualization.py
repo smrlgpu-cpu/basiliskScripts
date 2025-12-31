@@ -354,7 +354,7 @@ def run(show_plots, liveStream, broadcastStream,
         torqueControl = randomTorque.RandomTorque()
         torqueControl.ModelTag = "randomTorque"
         scSim.AddModelToTask(simTaskName, torqueControl)
-        torqueControl.setTorqueMagnitude(5)    # [Nm]
+        torqueControl.setTorqueMagnitude(1)    # [Nm]
         torqueControl.setSeed(rngSeed)
     else:
         raise BasiliskError(f"Invalid controller type: {controllerType}")
