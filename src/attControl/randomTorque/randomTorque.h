@@ -13,6 +13,13 @@
 
 #include <random>
 
+// Control Mode Definitions
+enum TorqueMode {
+    MODE_UNIFORM = 0,   // Random values in [-Mag, +Mag]
+    MODE_BANGBANG = 1,  // Either -Mag or +Mag
+    MODE_LOW_MAG = 2    // Random values in [-0.1*Mag, +0.1*Mag]
+};
+
 /*! @brief Random torque generator module */
 class RandomTorque: public SysModel {
 public:
@@ -40,6 +47,11 @@ public:
     /** getter for `seed` property */
     unsigned int getSeed() const {return this->seed;}
 
+    /** New Configuration Methods */
+    void setHoldPeriod(double seconds);       // Input hold period in seconds
+    void setDitherStd(double value);          // Standard deviation for dithering noise
+    void setControlMode(int mode);            // 0: Uniform, 1: Bang-Bang, 2: Low-Mag
+
 private:
     double torqueMagnitude = 0.01;                     //!< [Nm] Maximum magnitude of random torque
     unsigned int seed = 0;                              //!< Random number generator seed (0 = use time-based seed)
@@ -47,6 +59,14 @@ private:
     std::uniform_real_distribution<double> dist;       //!< Uniform distribution for random torque
     double ISCPntB_B[9];                               //!< [kg m^2] Spacecraft Inertia (from vehConfigInMsg)
 
+    // New members for Hold & Dithering logic
+    uint64_t holdPeriodNs;                    //!< [ns] Hold period
+    uint64_t nextUpdateNs;                    //!< [ns] Next simulation time to update base torque
+    double currentBaseTorque[3];              //!< [Nm] Currently held base torque vector
+    
+    double ditherStd;                         //!< [Nm] Standard deviation for dithering
+    int controlMode;                          //!< Control mode (TorqueMode enum)
+    std::normal_distribution<double> ditherDist; //!< Normal distribution for dithering
 };
 
 #endif

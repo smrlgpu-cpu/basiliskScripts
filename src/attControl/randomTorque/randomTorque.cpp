@@ -17,6 +17,14 @@ RandomTorque::RandomTorque()
     
     // Initialize uniform distribution from -torqueMagnitude to +torqueMagnitude
     this->dist = std::uniform_real_distribution<double>(-this->torqueMagnitude, this->torqueMagnitude);
+
+    // Initialize new parameters
+    this->holdPeriodNs = 0;
+    this->nextUpdateNs = 0;
+    this->controlMode = MODE_UNIFORM;
+    this->ditherStd = 0.0;
+    this->ditherDist = std::normal_distribution<double>(0.0, 1.0);
+    v3SetZero(this->currentBaseTorque);
 }
 
 /*! Module Destructor.  */
@@ -50,8 +58,11 @@ void RandomTorque::Reset(uint64_t CurrentSimNanos)
         for (int i = 0; i < 9; i++) {
             this->ISCPntB_B[i] = vehConfigMsg.ISCPntB_B[i];
         }
-    } else {
     }
+
+    // Reset Hold Logic
+    this->nextUpdateNs = CurrentSimNanos; 
+    v3SetZero(this->currentBaseTorque);
 
     /* zero output message on reset */
     CmdTorqueBodyMsgPayload outMsgBuffer = {};       /*!< local output message copy */
@@ -66,12 +77,8 @@ void RandomTorque::Reset(uint64_t CurrentSimNanos)
  */
 void RandomTorque::UpdateState(uint64_t CurrentSimNanos)
 {
-    double randomTorque[3];                          /*!< [Nm] Random torque vector */
     CmdTorqueBodyMsgPayload outMsgBuffer;           /*!< local output message copy */
     AttGuidMsgPayload guidInMsgBuffer;               /*!< local copy of guidance input message */
-    // RWArrayConfigMsgPayload rwParamsInMsgBuffer;     /*!< local copy of RW parameter input message */
-    // RWSpeedMsgPayload rwSpeedsInMsgBuffer;           /*!< local copy of RW speed input message */
-    // VehicleConfigMsgPayload vehConfigInMsgBuffer;     /*!< local copy of vehicle configuration input message */
 
     // always zero the output buffer first
     outMsgBuffer = this->cmdTorqueOutMsg.zeroMsgPayload;
@@ -79,17 +86,53 @@ void RandomTorque::UpdateState(uint64_t CurrentSimNanos)
     /*! - Read the optional input messages */
     if (this->guidInMsg.isLinked()) {
         guidInMsgBuffer = this->guidInMsg();
-        // Guidance message is available but not used for random torque generation
-        // This is just to match the interface of mrpFeedback
     }
 
-    /*! - Generate random torque for each axis */
-    randomTorque[0] = this->dist(this->rng);
-    randomTorque[1] = this->dist(this->rng);
-    randomTorque[2] = this->dist(this->rng);
+    // --- 1. Base Torque Update (Hold Logic) ---
+    // Update base torque if hold period is 0 (always update) or time threshold reached
+    if (this->holdPeriodNs == 0 || CurrentSimNanos >= this->nextUpdateNs) {
+        
+        for(int i=0; i<3; i++) {
+            double val = 0.0;
+            
+            if (this->controlMode == MODE_BANGBANG) { 
+                // [Mode 1: Bang-Bang] -Max or +Max
+                // Draw from uniform dist [-Mag, +Mag]. If >= 0, use +Mag, else -Mag.
+                double r = this->dist(this->rng); 
+                val = (r >= 0.0) ? this->torqueMagnitude : -this->torqueMagnitude;
+                
+            } else if (this->controlMode == MODE_LOW_MAG) {
+                // [Mode 2: Low Mag] -0.1*Mag ~ +0.1*Mag
+                // Scale the uniform distribution result by 0.1
+                val = this->dist(this->rng) * 0.1;
+                
+            } else {
+                // [Mode 0: Uniform] -Mag ~ +Mag
+                val = this->dist(this->rng);
+            }
+            
+            this->currentBaseTorque[i] = val;
+        }
+
+        // Schedule next update
+        if (this->holdPeriodNs > 0) {
+            this->nextUpdateNs = CurrentSimNanos + this->holdPeriodNs;
+        }
+    }
+
+    // --- 2. Apply Dithering & Write Output ---
+    // Add noise to the held base torque at every time step (e.g. 0.1s)
+    double finalTorque[3];
+    for(int i=0; i<3; i++) {
+        double noise = 0.0;
+        if (this->ditherStd > 0.0) {
+            noise = this->ditherDist(this->rng) * this->ditherStd;
+        }
+        finalTorque[i] = this->currentBaseTorque[i] + noise;
+    }
 
     /*! - store the output message */
-    v3Copy(randomTorque, outMsgBuffer.torqueRequestBody);
+    v3Copy(finalTorque, outMsgBuffer.torqueRequestBody);
 
     /*! - write the module output message */
     this->cmdTorqueOutMsg.write(&outMsgBuffer, this->moduleID, CurrentSimNanos);
@@ -103,7 +146,6 @@ void RandomTorque::setTorqueMagnitude(double value)
         this->torqueMagnitude = value;
         // Update distribution with new magnitude
         this->dist = std::uniform_real_distribution<double>(-this->torqueMagnitude, this->torqueMagnitude);
-    } else {
     }
 }
 
@@ -118,4 +160,20 @@ void RandomTorque::setSeed(unsigned int value)
     } else {
         this->rng = std::mt19937(this->seed);
     }
+}
+
+void RandomTorque::setHoldPeriod(double seconds) {
+    if (seconds >= 0) {
+        this->holdPeriodNs = (uint64_t)(seconds * 1e9);
+    }
+}
+
+void RandomTorque::setDitherStd(double value) {
+    if (value >= 0) {
+        this->ditherStd = value;
+    }
+}
+
+void RandomTorque::setControlMode(int mode) {
+    this->controlMode = mode;
 }
