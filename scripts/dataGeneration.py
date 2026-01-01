@@ -294,17 +294,16 @@ def createScenario():
     # Random Torque Control
     scSim.rngControl = randomTorque.RandomTorque()
     scSim.rngControl.ModelTag = "randomTorque"
-    scSim.rngControl.setTorqueMagnitude(1.0)
+    scSim.rngControl.setTorqueMagnitude(5.0)
 
     scSim.rngControl.setHoldPeriod(MC_CTRL_DT) 
     
     # 2. Dithering 추가 (Vanishing B 방지)
-    # 1.0 Nm의 0.5% 수준인 0.005 Nm 노이즈 추가
-    scSim.rngControl.setDitherStd(0.005) 
+    scSim.rngControl.setDitherStd(0.01) 
     
     # 3. 모드 섞기 (데이터 다양성 확보)
     # 0: Uniform (50%), 1: BangBang (30%), 2: Low (20%) 비율로 추출
-    mode_distribution = [0]*5 + [1]*3 + [2]*2 
+    mode_distribution = [0]*6 + [1]*4 + [2]*5 + [3]*5
     selected_mode = random.choice(mode_distribution)
     
     scSim.rngControl.setControlMode(int(selected_mode))

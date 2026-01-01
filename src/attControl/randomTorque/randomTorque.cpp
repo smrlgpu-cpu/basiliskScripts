@@ -2,11 +2,8 @@
 #include <iostream>
 #include <chrono>
 
-/*! This is the constructor for the module class.  It sets default variable
-    values and initializes the various parts of the model */
 RandomTorque::RandomTorque()
 {
-    // Initialize random number generator with default seed
     if (this->seed == 0) {
         unsigned int timeSeed = static_cast<unsigned int>(
             std::chrono::high_resolution_clock::now().time_since_epoch().count());
@@ -15,31 +12,23 @@ RandomTorque::RandomTorque()
         this->rng = std::mt19937(this->seed);
     }
     
-    // Initialize uniform distribution from -torqueMagnitude to +torqueMagnitude
-    this->dist = std::uniform_real_distribution<double>(-this->torqueMagnitude, this->torqueMagnitude);
+    this->dist = std::uniform_real_distribution<double>(0.0, 1.0);
 
-    // Initialize new parameters
     this->holdPeriodNs = 0;
     this->nextUpdateNs = 0;
     this->controlMode = MODE_UNIFORM;
     this->ditherStd = 0.0;
     this->ditherDist = std::normal_distribution<double>(0.0, 1.0);
-    v3SetZero(this->currentBaseTorque);
+    v3SetZero(this->currentFinalTorque);
 }
 
-/*! Module Destructor.  */
 RandomTorque::~RandomTorque()
 {
     return;
 }
 
-
-/*! This method is used to reset the module.
-
- */
 void RandomTorque::Reset(uint64_t CurrentSimNanos)
 {
-    /*! - Reinitialize random number generator */
     if (this->seed == 0) {
         unsigned int timeSeed = static_cast<unsigned int>(
             std::chrono::high_resolution_clock::now().time_since_epoch().count());
@@ -48,70 +37,73 @@ void RandomTorque::Reset(uint64_t CurrentSimNanos)
         this->rng = std::mt19937(this->seed);
     }
     
-    // Reinitialize distribution with current torqueMagnitude
-    this->dist = std::uniform_real_distribution<double>(-this->torqueMagnitude, this->torqueMagnitude);
+    this->dist = std::uniform_real_distribution<double>(0.0, 1.0);
 
-    /*! - Read vehicle configuration message if linked */
     if (this->vehConfigInMsg.isLinked()) {
         VehicleConfigMsgPayload vehConfigMsg = this->vehConfigInMsg();
-        // Copy inertia tensor
         for (int i = 0; i < 9; i++) {
             this->ISCPntB_B[i] = vehConfigMsg.ISCPntB_B[i];
         }
     }
 
-    // Reset Hold Logic
     this->nextUpdateNs = CurrentSimNanos; 
-    v3SetZero(this->currentBaseTorque);
+    v3SetZero(this->currentFinalTorque);
 
-    /* zero output message on reset */
-    CmdTorqueBodyMsgPayload outMsgBuffer = {};       /*!< local output message copy */
+    CmdTorqueBodyMsgPayload outMsgBuffer = {};
     v3SetZero(outMsgBuffer.torqueRequestBody);
     this->cmdTorqueOutMsg.write(&outMsgBuffer, this->moduleID, CurrentSimNanos);
 }
 
-
-/*! This is the main method that gets called every time the module is updated.
-    It generates a random torque vector and writes it to the output message.
-
- */
 void RandomTorque::UpdateState(uint64_t CurrentSimNanos)
 {
-    CmdTorqueBodyMsgPayload outMsgBuffer;           /*!< local output message copy */
-    AttGuidMsgPayload guidInMsgBuffer;               /*!< local copy of guidance input message */
-
-    // always zero the output buffer first
+    CmdTorqueBodyMsgPayload outMsgBuffer;
     outMsgBuffer = this->cmdTorqueOutMsg.zeroMsgPayload;
 
-    /*! - Read the optional input messages */
-    if (this->guidInMsg.isLinked()) {
-        guidInMsgBuffer = this->guidInMsg();
-    }
-
-    // --- 1. Base Torque Update (Hold Logic) ---
-    // Update base torque if hold period is 0 (always update) or time threshold reached
+    // --- 1. Update Logic (Executed only when hold period expires) ---
     if (this->holdPeriodNs == 0 || CurrentSimNanos >= this->nextUpdateNs) {
         
         for(int i=0; i<3; i++) {
             double val = 0.0;
-            
-            if (this->controlMode == MODE_BANGBANG) { 
-                // [Mode 1: Bang-Bang] -Max or +Max
-                // Draw from uniform dist [-Mag, +Mag]. If >= 0, use +Mag, else -Mag.
-                double r = this->dist(this->rng); 
-                val = (r >= 0.0) ? this->torqueMagnitude : -this->torqueMagnitude;
+            double randVal = this->dist(this->rng); // [0.0, 1.0]
+
+            if (this->controlMode == MODE_SATURATION) { 
+                // [Mode 1: Saturation] 95% ~ 100% of Mag
+                // jitter within the saturation boundary
+                double sign = (randVal >= 0.5) ? 1.0 : -1.0;
                 
-            } else if (this->controlMode == MODE_LOW_MAG) {
-                // [Mode 2: Low Mag] -0.1*Mag ~ +0.1*Mag
-                // Scale the uniform distribution result by 0.1
-                val = this->dist(this->rng) * 0.1;
+                // New random draw for magnitude scaling
+                double randMag = this->dist(this->rng); 
+                double magScale = 0.95 + (randMag * 0.05); // [0.95, 1.00]
                 
+                val = sign * magScale * this->torqueMagnitude;
+                
+            } else if (this->controlMode == MODE_LOW) {
+                // [Mode 2: Low Mag] -20% ~ +20%
+                double normalized = (randVal * 2.0) - 1.0; // [-1.0, 1.0]
+                val = normalized * 0.2 * this->torqueMagnitude;
+                
+            } else if (this->controlMode == MODE_MEDIUM) {
+                // [Mode 3: Medium] 50% ~ 80%
+                double sign = (randVal >= 0.5) ? 1.0 : -1.0;
+                double randMag = this->dist(this->rng);
+                double magScale = 0.5 + (randMag * 0.3); // [0.5, 0.8]
+                val = sign * magScale * this->torqueMagnitude;
+
             } else {
-                // [Mode 0: Uniform] -Mag ~ +Mag
-                val = this->dist(this->rng);
+                // [Mode 0: Uniform] -100% ~ +100%
+                double normalized = (randVal * 2.0) - 1.0;
+                val = normalized * this->torqueMagnitude;
             }
             
-            this->currentBaseTorque[i] = val;
+            // --- 2. Apply Dithering Here (Synchronized with Control Update) ---
+            // Dithering is now part of the held value
+            double noise = 0.0;
+            if (this->ditherStd > 0.0) {
+                noise = this->ditherDist(this->rng) * this->ditherStd;
+            }
+            
+            // Store final combined torque
+            this->currentFinalTorque[i] = val + noise;
         }
 
         // Schedule next update
@@ -120,39 +112,19 @@ void RandomTorque::UpdateState(uint64_t CurrentSimNanos)
         }
     }
 
-    // --- 2. Apply Dithering & Write Output ---
-    // Add noise to the held base torque at every time step (e.g. 0.1s)
-    double finalTorque[3];
-    for(int i=0; i<3; i++) {
-        double noise = 0.0;
-        if (this->ditherStd > 0.0) {
-            noise = this->ditherDist(this->rng) * this->ditherStd;
-        }
-        finalTorque[i] = this->currentBaseTorque[i] + noise;
-    }
+    // --- 3. Output the Held Torque ---
+    // This value remains constant for 1.0s (including the dither noise)
+    v3Copy(this->currentFinalTorque, outMsgBuffer.torqueRequestBody);
 
-    /*! - store the output message */
-    v3Copy(finalTorque, outMsgBuffer.torqueRequestBody);
-
-    /*! - write the module output message */
     this->cmdTorqueOutMsg.write(&outMsgBuffer, this->moduleID, CurrentSimNanos);
-
 }
 
-void RandomTorque::setTorqueMagnitude(double value)
-{
-    // check that value is in acceptable range
-    if (value >= 0.0) {
-        this->torqueMagnitude = value;
-        // Update distribution with new magnitude
-        this->dist = std::uniform_real_distribution<double>(-this->torqueMagnitude, this->torqueMagnitude);
-    }
+void RandomTorque::setTorqueMagnitude(double value) {
+    if (value >= 0.0) this->torqueMagnitude = value;
 }
 
-void RandomTorque::setSeed(unsigned int value)
-{
+void RandomTorque::setSeed(unsigned int value) {
     this->seed = value;
-    // Reinitialize random number generator with new seed
     if (this->seed == 0) {
         unsigned int timeSeed = static_cast<unsigned int>(
             std::chrono::high_resolution_clock::now().time_since_epoch().count());
