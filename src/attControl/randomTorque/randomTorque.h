@@ -19,6 +19,7 @@ enum TorqueMode {
     MODE_SATURATION = 1, // Random values in [-Mag, -0.95*Mag] U [+0.95*Mag, +Mag]
     MODE_LOW = 2,        // Random values in [-0.2*Mag, +0.2*Mag]
     MODE_MEDIUM = 3      // Random values in [-0.8*Mag, -0.5*Mag] U [+0.5*Mag, +0.8*Mag]
+    MODE_ULTRA_LOW = 4   // Random values in [-0.005*Mag, +0.005*Mag]
 };
 
 /*! @brief Random torque generator module */

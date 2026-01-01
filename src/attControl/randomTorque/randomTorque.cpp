@@ -89,7 +89,14 @@ void RandomTorque::UpdateState(uint64_t CurrentSimNanos)
                 double magScale = 0.5 + (randMag * 0.3); // [0.5, 0.8]
                 val = sign * magScale * this->torqueMagnitude;
 
-            } else {
+            }
+            
+            else if (this->controlMode == MODE_ULTRA_LOW) {
+                double normalized = (randVal * 2.0) - 1.0; // [-1.0, 1.0]
+                val = normalized * 0.005 * this->torqueMagnitude;
+            }
+            
+            else {
                 // [Mode 0: Uniform] -100% ~ +100%
                 double normalized = (randVal * 2.0) - 1.0;
                 val = normalized * this->torqueMagnitude;
