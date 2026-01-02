@@ -246,8 +246,8 @@ def createScenario():
         positions = [[0.1,0,-0.1], [0,0,0.1], [-0.1,0,0.1]]
         for i, (direction, position) in enumerate(zip(directions, positions)):
             particle = linearSpringMassDamper.LinearSpringMassDamper()
-            particle.k = 100.0
-            particle.c = 5.0
+            particle.k = 0.2
+            particle.c = 0.05
             particle.r_PB_B = [[position[0]], [position[1]], [position[2]]]
             particle.pHat_B = [[direction[0]], [direction[1]], [direction[2]]]
             particle.rhoInit = 0.05 if i == 0 else -0.025
@@ -294,7 +294,7 @@ def createScenario():
     # Random Torque Control
     scSim.rngControl = randomTorque.RandomTorque()
     scSim.rngControl.ModelTag = "randomTorque"
-    scSim.rngControl.setTorqueMagnitude(5.0)
+    scSim.rngControl.setTorqueMagnitude(2)
 
     scSim.rngControl.setHoldPeriod(MC_CTRL_DT) 
     
@@ -302,8 +302,7 @@ def createScenario():
     scSim.rngControl.setDitherStd(0.01) 
     
     # 3. 모드 섞기 (데이터 다양성 확보)
-    # 0: Uniform (50%), 1: BangBang (30%), 2: Low (20%) 비율로 추출
-    mode_distribution = [0]*6 + [1]*4 + [2]*5 + [3]*5
+    mode_distribution = [0]*4 + [1]*1 + [2]*2 + [3]*1 + [4]*2
     selected_mode = random.choice(mode_distribution)
     
     scSim.rngControl.setControlMode(int(selected_mode))
