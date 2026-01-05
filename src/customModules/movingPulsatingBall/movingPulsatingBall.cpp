@@ -33,8 +33,11 @@ MovingPulsatingBall::MovingPulsatingBall() {
    // [Fix 1] Numerical Stability Tuning
    // Lower stiffness to prevent explosion at dt=0.01s or 0.001s
    // Higher damping to make it "sticky" rather than "bouncy"
-   this->k_barrier = 1000.0;  
-   this->c_barrier = 100.0;   
+   // UPDATED: Values adapted for Non-linear Hertzian/Hunt-Crossley model
+   // k: Reduced to 1e5 to reduce stiffness (Still strong enough for 100kg fuel)
+   // c: Tuned to provide critical damping at impact
+   this->k_barrier = 1e5;  
+   this->c_barrier = 5e4;  
 
    this->r_TB_B.setZero(); 
 
@@ -159,29 +162,34 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
    
    double N_val = (3.0 * this->massInit / 8.0) * (term1 + term2 + term3) + term4 + term5;
    
-   // [SOFT PENALTY LOGIC]
-   // [Fix 5] Ensure L is within physical bounds for penetration calculation
+   // [SOFT PENALTY LOGIC] - Improved for Numerical Stability (Continuous Force)
    if (L <= this->radiusSlugMin) {
-      double penetration = this->radiusSlugMin - L; // Positive when penetrating
+      double penetration = this->radiusSlugMin - L; // delta > 0
+      double speed_into_wall = -r_dot_scalar;       // v_normal (>0 when moving into wall)
       
-      // Cap penetration to avoid extreme forces if numerical integration overshoots significantly
-      if (penetration > 2.0 * this->radiusSlugMin) penetration = 2.0 * this->radiusSlugMin;
-
-      double speed_into_wall = -r_dot_scalar;       // Positive when moving towards L=0
+      // 1. Non-linear Spring (Hertzian-like)
+      //    Using quadratic spring: F = k * delta^2
+      //    Provides smooth onset of force at delta=0 (C1 continuous)
+      double spring_force = this->k_barrier * penetration * penetration;
       
-      double spring_force = this->k_barrier * penetration;
-      double damping_force = this->c_barrier * speed_into_wall;
+      // 2. Hunt-Crossley Damping
+      //    F_d = c * delta^n * v_normal
+      //    Here using linear delta dependence for damping (n=1)
+      //    Ensures damping is zero at impact moment (delta=0), preventing impulsive force spikes.
+      double damping_force = this->c_barrier * penetration * speed_into_wall;
       
-      if (speed_into_wall < 0) damping_force = 0; 
+      if (speed_into_wall < 0) damping_force = 0; // Only damp when compressing
 
       N_val += (spring_force + damping_force);
    }
    
    // Friction Force F_bi (Zhang Eq. 7)
-   // [Fix 3] Clamping to prevent division by zero / massive forces
-   double epsilon = 0.05; // 5cm floor
-   double L_clamped = (L < epsilon) ? epsilon : L;
-   double coef_F = (6500.0 * this->kinematicViscosity * this->massInit) / (L_clamped * L_clamped);
+   // [Fix 3] Regularized Friction to avoid Singularity at L=0
+   // Replaced hard clamp with soft saturation: 1 / (L^2 + epsilon^2)
+   double eps_friction = 0.05; // Softening parameter (meters)
+   double denom = L*L + eps_friction*eps_friction;
+   
+   double coef_F = (6500.0 * this->kinematicViscosity * this->massInit) / denom;
    
    Eigen::Vector3d inner_vec = e_i.cross(v_vec) + L * omega_s;
    Eigen::Vector3d F_bi = -coef_F * e_i.cross(inner_vec);
@@ -239,8 +247,9 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
 void MovingPulsatingBall::UpdateState(uint64_t CurrentSimNanos) {
     // [Validation] Log internal states to output message
     SCStatesMsgPayload outMsgBuffer;
-    memset(&outMsgBuffer, 0x0, sizeof(SCStatesMsgPayload)); 
-
+    // Zero out the structure to prevent "not properly initialized" warnings
+    outMsgBuffer = SCStatesMsgPayload();
+    
     Eigen::Vector3d r_vec = this->posState->getState();
     Eigen::Vector3d v_vec = this->velState->getState();
     Eigen::Vector3d t_vec = this->current_T_Li;
