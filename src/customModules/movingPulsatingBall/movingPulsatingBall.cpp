@@ -1,7 +1,9 @@
 /*
-* MPBM State Effector Implementation (Soft Penalty Version)
-* Optimized for RK4 @ 0.01s step size
-* Prevents numerical chattering while enforcing L >= L_min
+* MPBM State Effector Implementation (Robust Version)
+* Features:
+* - Soft Penalty with Tuned Parameters (Prevents Numerical Explosion)
+* - Friction Force Clamping (Prevents Singularity at small L)
+* - Internal State Logging (r, v, T_Li) for Validation
 */
 
 #include "movingPulsatingBall.h"
@@ -13,28 +15,32 @@
 Eigen::Matrix3d eigenTilde(Eigen::Vector3d v) {
    Eigen::Matrix3d m;
    m << 0, -v[2], v[1],
-         v[2], 0, -v[0],
-         -v[1], v[0], 0;
+        v[2], 0, -v[0],
+        -v[1], v[0], 0;
    return m;
 }
 
 MovingPulsatingBall::MovingPulsatingBall() {
    // --- 500kg Spacecraft / 100kg Fuel Setup ---
-   this->massInit = 100.0;           
-   this->radiusTank = 0.35;          
-   this->radiusSlugMin = 0.10;       
+   this->massInit = 100.0;            
+   this->radiusTank = 0.50;           
+   this->radiusSlugMin = 0.10;        
    this->kinematicViscosity = 2.839e-6; // Hydrazine
-   this->surfaceTension = 0.066;     
-   this->rho = 1004.0;               
-   this->t_sr = 1.0;                 
+   this->surfaceTension = 0.066;      
+   this->rho = 1004.0;                
+   this->t_sr = 1.0;                  
    
-   // Soft Barrier Tuning for RK4 @ 0.01s
-   // Natural Frequency wn = sqrt(k/m) = sqrt(50000/100) = 22.3 rad/s
-   // Period T = 0.28s >> 0.01s (Stable)
-   this->k_barrier = 50000.0;  
-   this->c_barrier = 2000.0;   // Over-damped to prevent oscillation at wall
+   // [Fix 1] Numerical Stability Tuning
+   // Lower stiffness to prevent explosion at dt=0.01s or 0.001s
+   // Higher damping to make it "sticky" rather than "bouncy"
+   this->k_barrier = 1000.0;  
+   this->c_barrier = 100.0;   
 
    this->r_TB_B.setZero(); 
+
+   // [Init] Default Initial States (Can be overwritten by Python)
+   this->r_Init_B << 0.0, 0.0, 0.1; 
+   this->v_Init_B.setZero();
 
    this->nameOfPosState = "mpbmPos";
    this->nameOfVelState = "mpbmVel";
@@ -48,16 +54,14 @@ void MovingPulsatingBall::Reset(uint64_t CurrentSimNanos) {
 }
 
 void MovingPulsatingBall::registerStates(DynParamManager& states) {
-   // Slight offset to avoid singularity
-   Eigen::Vector3d initPos; initPos << 0.0, 0.0, 0.01; 
-   Eigen::Vector3d initVel; initVel.setZero();
    Eigen::Vector3d initOmega; initOmega.setZero();
 
+   // [Init] Use Configured Initial States
    this->posState = states.registerState(3, 1, this->nameOfPosState);
-   this->posState->setState(initPos);
+   this->posState->setState(this->r_Init_B);
 
    this->velState = states.registerState(3, 1, this->nameOfVelState);
-   this->velState->setState(initVel);
+   this->velState->setState(this->v_Init_B);
 
    this->omegaState = states.registerState(3, 1, this->nameOfOmegaState);
    this->omegaState->setState(initOmega);
@@ -116,14 +120,23 @@ void MovingPulsatingBall::updateEnergyMomContributions(double integTime, Eigen::
 
 void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d rDDot_BN_N, Eigen::Vector3d omegaDot_BN_B, Eigen::Vector3d sigma_BN) {
    // --- 1. Retrieve States ---
-   Eigen::Vector3d r_vec = this->posState->getState();      
-   Eigen::Vector3d v_vec = this->velState->getState();      
+   Eigen::Vector3d r_vec = this->posState->getState();       
+   Eigen::Vector3d v_vec = this->velState->getState();       
    Eigen::Vector3d omega_s = this->omegaState->getState();  
    Eigen::Vector3d omega_hub = this->omega_BN_B;            
    Eigen::Vector3d omegaDot_hub = omegaDot_BN_B;            
    
    double r_norm = r_vec.norm();
-   if (r_norm < 1e-5) { r_norm = 1e-5; r_vec << 0,0,1e-5; }
+   // [Fix 2] Robust Singularity Protection
+   if (r_norm < 1e-3) { 
+       r_norm = 1e-3; 
+       // If vector is too small, pick arbitrary direction to avoid NaN from normalized()
+       if (r_vec.norm() < 1e-6) {
+           r_vec = Eigen::Vector3d(0.0, 0.0, 1.0) * r_norm;
+       } else {
+           r_vec = r_vec.normalized() * r_norm; 
+       }
+   }
    
    double L = this->radiusTank - r_norm; 
    Eigen::Vector3d e_i = r_vec.normalized(); 
@@ -147,23 +160,29 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
    double N_val = (3.0 * this->massInit / 8.0) * (term1 + term2 + term3) + term4 + term5;
    
    // [SOFT PENALTY LOGIC]
-   // Instead of hard-switching physics models, we add a virtual spring-damper
-   // when L drops below L_min (i.e., when slug gets too close to wall).
+   // [Fix 5] Ensure L is within physical bounds for penetration calculation
    if (L <= this->radiusSlugMin) {
       double penetration = this->radiusSlugMin - L; // Positive when penetrating
+      
+      // Cap penetration to avoid extreme forces if numerical integration overshoots significantly
+      if (penetration > 2.0 * this->radiusSlugMin) penetration = 2.0 * this->radiusSlugMin;
+
       double speed_into_wall = -r_dot_scalar;       // Positive when moving towards L=0
       
       double spring_force = this->k_barrier * penetration;
       double damping_force = this->c_barrier * speed_into_wall;
       
-      // Only apply damping if it's actually moving into the wall
       if (speed_into_wall < 0) damping_force = 0; 
 
       N_val += (spring_force + damping_force);
    }
    
    // Friction Force F_bi (Zhang Eq. 7)
-   double coef_F = (6500.0 * this->kinematicViscosity * this->massInit) / (L * L);
+   // [Fix 3] Clamping to prevent division by zero / massive forces
+   double epsilon = 0.05; // 5cm floor
+   double L_clamped = (L < epsilon) ? epsilon : L;
+   double coef_F = (6500.0 * this->kinematicViscosity * this->massInit) / (L_clamped * L_clamped);
+   
    Eigen::Vector3d inner_vec = e_i.cross(v_vec) + L * omega_s;
    Eigen::Vector3d F_bi = -coef_F * e_i.cross(inner_vec);
    
@@ -174,11 +193,11 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
    if(omega_s_norm < 1e-8) omega_s_norm = 1e-8;
 
    double f_ac = 0.36 * std::pow(this->massInit, 4.0/3.0) 
-               * std::pow(this->rho, 1.0/6.0) 
-               * std::sqrt(this->kinematicViscosity)
-               * std::pow(L / this->radiusSlugMin, 2.0) 
-               * std::sqrt(omega_s_norm);
-               
+                * std::pow(this->rho, 1.0/6.0) 
+                * std::sqrt(this->kinematicViscosity)
+                * std::pow(L / this->radiusSlugMin, 2.0) 
+                * std::sqrt(omega_s_norm);
+                
    Eigen::Vector3d T_Li = f_ac * (this->t_sr * omega_ri + (1.0 - this->t_sr)*(omega_s - omega_ri));
    
    // --- 4. Solve Dynamics ---
@@ -197,7 +216,9 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
    Eigen::Vector3d v_dot = (-F_Li / this->massInit) - inertial_acc;
    
    // B. Rotational
-   double I_s = 0.4 * this->massInit * L * L;
+   // [Fix 4] Inertia Singularity Protection
+   double L_inertia = (L < 1e-3) ? 1e-3 : L;
+   double I_s = 0.4 * this->massInit * L_inertia * L_inertia;
    
    Eigen::Vector3d RHS_Eq4 = -T_Li - L * e_i.cross(F_Li);
    Eigen::Vector3d LHS_Coriolis = (0.4 * this->massInit * L) * (-2.0 * r_dot_scalar) * (omega_s + omega_hub);
@@ -207,10 +228,35 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
    Eigen::Vector3d omega_s_dot = Torque_Net / I_s;
    
    // --- 5. Save Derivatives ---
-   this->posState->setDerivative(v_vec);     
-   this->velState->setDerivative(v_dot);     
+   this->posState->setDerivative(v_vec);      
+   this->velState->setDerivative(v_dot);      
    this->omegaState->setDerivative(omega_s_dot); 
+
+   // [Validation] Store Interaction Torque for Logging
+   this->current_T_Li = T_Li;
 }
 
 void MovingPulsatingBall::UpdateState(uint64_t CurrentSimNanos) {
+    // [Validation] Log internal states to output message
+    SCStatesMsgPayload outMsgBuffer;
+    memset(&outMsgBuffer, 0x0, sizeof(SCStatesMsgPayload)); 
+
+    Eigen::Vector3d r_vec = this->posState->getState();
+    Eigen::Vector3d v_vec = this->velState->getState();
+    Eigen::Vector3d t_vec = this->current_T_Li;
+
+    // Field Mapping:
+    // r_BN_N -> Slug Position
+    eigenVector3d2CArray(r_vec, outMsgBuffer.r_BN_N);
+    
+    // v_BN_N -> Slug Velocity
+    eigenVector3d2CArray(v_vec, outMsgBuffer.v_BN_N);
+    
+    // omega_BN_B -> Interaction Torque (Important for Validation)
+    eigenVector3d2CArray(t_vec, outMsgBuffer.omega_BN_B); 
+
+    // totalMass -> Slug Mass
+    // outMsgBuffer.totalMass = this->massInit;
+
+    this->mpbmOutMsg.write(&outMsgBuffer, this->moduleID, CurrentSimNanos);
 }

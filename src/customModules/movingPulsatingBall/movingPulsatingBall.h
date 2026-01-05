@@ -8,6 +8,10 @@
 #include <Eigen/Dense>
 #include <string>
 
+// [Validation] Payload for logging hidden states
+#include "architecture/msgPayloadDefC/SCStatesMsgPayload.h"
+#include "architecture/messaging/messaging.h"
+
 class MovingPulsatingBall : public StateEffector, public SysModel {
 public:
     MovingPulsatingBall();
@@ -23,6 +27,9 @@ public:
     void UpdateState(uint64_t CurrentSimNanos) override;
 
 public:
+    // [Validation] Output Message for logging (r_slug, v_slug, T_interaction)
+    Message<SCStatesMsgPayload> mpbmOutMsg;
+
     // Parameters for 500kg Sat / 100kg Fuel
     double massInit;            //!< [kg] m_s: Fuel mass
     double radiusTank;          //!< [m] R: Tank radius
@@ -38,6 +45,10 @@ public:
 
     Eigen::Vector3d r_TB_B;     //!< Tank Center w.r.t. Body Frame
 
+    // [Init] Random Initialization Support
+    Eigen::Vector3d r_Init_B;   //!< Initial Position
+    Eigen::Vector3d v_Init_B;   //!< Initial Velocity
+
     std::string nameOfPosState;   
     std::string nameOfVelState;   
     std::string nameOfOmegaState; 
@@ -52,6 +63,8 @@ private:
     Eigen::Vector3d omega_BN_B; 
     
     double currentSlugRadius;   
+
+    Eigen::Vector3d current_T_Li;
 };
 
 #endif

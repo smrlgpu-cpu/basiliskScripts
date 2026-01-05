@@ -1,6 +1,7 @@
 %module movingPulsatingBall
 %{
 #include "movingPulsatingBall.h"
+#include "architecture/msgPayloadDefC/SCStatesMsgPayload.h"
 %}
 
 %include "swig_conly_data.i"
@@ -11,6 +12,10 @@
 // 부모 클래스 포함 (상속 관계 인식용)
 %include "sys_model.h"
 %include "simulation/dynamics/_GeneralModuleFiles/stateEffector.h"
+
+// 메시지 페이로드 정의
+%include "architecture/msgPayloadDefC/SCStatesMsgPayload.h"
+struct SCStatesMsg_C;
 
 // 해당 모듈 헤더
 %include "movingPulsatingBall.h"

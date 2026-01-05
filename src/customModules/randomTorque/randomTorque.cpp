@@ -1,6 +1,8 @@
 #include "randomTorque.h"
 #include <iostream>
 #include <chrono>
+#include <cmath>
+#include <algorithm> // for std::min, std::max
 
 RandomTorque::RandomTorque()
 {
@@ -59,57 +61,102 @@ void RandomTorque::UpdateState(uint64_t CurrentSimNanos)
     CmdTorqueBodyMsgPayload outMsgBuffer;
     outMsgBuffer = this->cmdTorqueOutMsg.zeroMsgPayload;
 
+    // --- Retrieve Angular Velocity for Safety Rail ---
+    AttGuidMsgPayload guidMsg = {};
+    if (this->guidInMsg.isLinked()) {
+        guidMsg = this->guidInMsg();
+    }
+
     // --- 1. Update Logic (Executed only when hold period expires) ---
     if (this->holdPeriodNs == 0 || CurrentSimNanos >= this->nextUpdateNs) {
         
         for(int i=0; i<3; i++) {
             double val = 0.0;
-            double randVal = this->dist(this->rng); // [0.0, 1.0]
-
-            if (this->controlMode == MODE_SATURATION) { 
-                // [Mode 1: Saturation] 95% ~ 100% of Mag
-                // jitter within the saturation boundary
-                double sign = (randVal >= 0.5) ? 1.0 : -1.0;
-                
-                // New random draw for magnitude scaling
-                double randMag = this->dist(this->rng); 
-                double magScale = 0.95 + (randMag * 0.05); // [0.95, 1.00]
-                
-                val = sign * magScale * this->torqueMagnitude;
-                
-            } else if (this->controlMode == MODE_LOW) {
-                // [Mode 2: Low Mag] -20% ~ +20%
-                double normalized = (randVal * 2.0) - 1.0; // [-1.0, 1.0]
-                val = normalized * 0.2 * this->torqueMagnitude;
-                
-            } else if (this->controlMode == MODE_MEDIUM) {
-                // [Mode 3: Medium] 50% ~ 80%
-                double sign = (randVal >= 0.5) ? 1.0 : -1.0;
-                double randMag = this->dist(this->rng);
-                double magScale = 0.5 + (randMag * 0.3); // [0.5, 0.8]
-                val = sign * magScale * this->torqueMagnitude;
-
-            }
+            double currentOmega = guidMsg.omega_BR_B[i];
+            double absOmega = std::abs(currentOmega);
             
-            else if (this->controlMode == MODE_ULTRA_LOW) {
-                double normalized = (randVal * 2.0) - 1.0; // [-1.0, 1.0]
-                val = normalized * 0.005 * this->torqueMagnitude;
-            }
-            
+            // ================================================================
+            // Safety Rail Logic: Gradual Distribution (0.3 rad/s)
+            // ================================================================
+            if (absOmega > 0.2) {
+                
+                // 1. Calculate Mixing Factor alpha [0.0 ~ 1.0]
+                // 0.2 rad/s -> alpha = 0.0 (No Shift)
+                // 0.3 rad/s -> alpha = 1.0 (Max Shift)
+                double alpha = (absOmega - 0.2) / (0.3 - 0.2);
+                if (alpha > 1.0) alpha = 1.0;
+
+                double randVal = this->dist(this->rng); // [0.0, 1.0]
+                double minScale, maxScale;
+
+                // 2. Interpolate Torque Range based on alpha
+                if (currentOmega > 0) {
+                    // [Positive Spin] -> We want Negative Torque (Braking)
+                    // Normal: [-1.0, 1.0]
+                    // Target: [-1.0, 0.2] (Shift upper bound down)
+                    
+                    double targetMax = 0.2;
+                    double normalMax = 1.0;
+                    
+                    minScale = -1.0; 
+                    // Gradually reduce the maximum acceleration torque allowed
+                    maxScale = normalMax - alpha * (normalMax - targetMax); 
+                } 
+                else {
+                    // [Negative Spin] -> We want Positive Torque (Braking)
+                    // Normal: [-1.0, 1.0]
+                    // Target: [-0.2, 1.0] (Shift lower bound up)
+                    
+                    double targetMin = -0.2;
+                    double normalMin = -1.0;
+                    
+                    // Gradually increase the minimum acceleration torque allowed
+                    minScale = normalMin + alpha * (targetMin - normalMin);
+                    maxScale = 1.0;
+                }
+
+                // 3. Sample from the interpolated biased distribution
+                double scale = minScale + (maxScale - minScale) * randVal;
+                val = scale * this->torqueMagnitude;
+            } 
             else {
-                // [Mode 0: Uniform] -100% ~ +100%
-                double normalized = (randVal * 2.0) - 1.0;
-                val = normalized * this->torqueMagnitude;
+                // ================================================================
+                // Normal Random Control Modes (Safe Region: < 0.2 rad/s)
+                // ================================================================
+                double randVal = this->dist(this->rng); 
+
+                if (this->controlMode == MODE_SATURATION) { 
+                    double sign = (randVal >= 0.5) ? 1.0 : -1.0;
+                    double randMag = this->dist(this->rng); 
+                    double magScale = 0.95 + (randMag * 0.05); 
+                    val = sign * magScale * this->torqueMagnitude;
+                    
+                } else if (this->controlMode == MODE_LOW) {
+                    double normalized = (randVal * 2.0) - 1.0; 
+                    val = normalized * 0.2 * this->torqueMagnitude;
+                    
+                } else if (this->controlMode == MODE_MEDIUM) {
+                    double sign = (randVal >= 0.5) ? 1.0 : -1.0;
+                    double randMag = this->dist(this->rng);
+                    double magScale = 0.5 + (randMag * 0.3); 
+                    val = sign * magScale * this->torqueMagnitude;
+
+                } else if (this->controlMode == MODE_ULTRA_LOW) {
+                    double normalized = (randVal * 2.0) - 1.0; 
+                    val = normalized * 0.005 * this->torqueMagnitude;
+
+                } else { // MODE_UNIFORM
+                    double normalized = (randVal * 2.0) - 1.0;
+                    val = normalized * this->torqueMagnitude;
+                }
             }
             
             // --- 2. Apply Dithering Here (Synchronized with Control Update) ---
-            // Dithering is now part of the held value
             double noise = 0.0;
             if (this->ditherStd > 0.0) {
                 noise = this->ditherDist(this->rng) * this->ditherStd;
             }
             
-            // Store final combined torque
             this->currentFinalTorque[i] = val + noise;
         }
 
@@ -120,9 +167,7 @@ void RandomTorque::UpdateState(uint64_t CurrentSimNanos)
     }
 
     // --- 3. Output the Held Torque ---
-    // This value remains constant for 1.0s (including the dither noise)
     v3Copy(this->currentFinalTorque, outMsgBuffer.torqueRequestBody);
-
     this->cmdTorqueOutMsg.write(&outMsgBuffer, this->moduleID, CurrentSimNanos);
 }
 

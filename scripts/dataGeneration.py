@@ -33,6 +33,8 @@ from Basilisk.fswAlgorithms import inertial3D
 
 # External modules
 from Basilisk.ExternalModules import randomTorque
+from Basilisk.ExternalModules import movingPulsatingBall
+
 from Basilisk import __path__
 
 # Monte Carlo imports
@@ -47,7 +49,8 @@ MC_CTRL_DT = 1.0
 MC_LOG_DT = 0.1
 MC_SIM_DT = 0.01
 MC_SIM_TIME = 1000.0
-MC_USE_SLOSHING = False
+MC_SLOSHING_MODEL = "none"
+MC_VALIDATION = False
 
 # Helper function to compute dcm_F0B from normal vector (must be at module level for pickling)
 def normalToDcmF0B(nHat_B):
@@ -71,7 +74,7 @@ def createScenario():
     Creates the simulation scenario for Monte Carlo runs.
     Uses global variables MC_CONTROLLER_TIMESTEP and MC_SIMULATION_TIME.
     """
-    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME, MC_USE_SLOSHING
+    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME, MC_SLOSHING_MODEL
     ctrlDtNano = macros.sec2nano(MC_CTRL_DT)
     logDtNano = macros.sec2nano(MC_LOG_DT)
     simDtNano = macros.sec2nano(MC_SIM_DT)
@@ -233,15 +236,26 @@ def createScenario():
     scObject.addDynamicEffector(scSim.ggEffector)
     scSim.AddModelToTask(dynTaskName, scSim.ggEffector)
 
-    useSloshing = MC_USE_SLOSHING
+    sloshingModel = MC_SLOSHING_MODEL
 
-    scSim.tank = fuelTank.FuelTank()
-    scSim.tankModel = fuelTank.FuelTankModelConstantVolume()
-    scSim.tankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
-    scSim.tankModel.radiusTankInit = 0.5
-    scSim.particles = []
-    
-    if useSloshing:
+    # --- Sloshing Model Selection ---
+    if sloshingModel == "mpbm":
+        scSim.mpbm = movingPulsatingBall.MovingPulsatingBall()
+        scSim.mpbm.ModelTag = "mpbm"
+        scSim.mpbm.massInit = 100.0
+        scSim.mpbm.radiusTank = 0.5
+        scSim.mpbm.r_TB_B = [[0.0], [0.0], [0.1]]
+        
+        scObject.addStateEffector(scSim.mpbm)
+        scSim.AddModelToTask(dynTaskName, scSim.mpbm)
+
+    elif sloshingModel == "spring":
+        scSim.tank = fuelTank.FuelTank()
+        scSim.tankModel = fuelTank.FuelTankModelConstantVolume()
+        scSim.tankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
+        scSim.tankModel.radiusTankInit = 0.5
+        scSim.particles = []
+
         directions = [[1,0,0], [0,1,0], [0,0,1]]
         positions = [[0.1,0,-0.1], [0,0,0.1], [-0.1,0,0.1]]
         for i, (direction, position) in enumerate(zip(directions, positions)):
@@ -254,20 +268,32 @@ def createScenario():
             particle.rhoDotInit = 0.0
             particle.massInit = 10.0
             scSim.particles.append(particle)
-        scSim.tankModel.propMassInit = 70.0
-    else:
-        scSim.tankModel.propMassInit = 100.0
-
-    scSim.tank.setTankModel(scSim.tankModel)
-    scSim.tank.r_TB_B = [[0], [0], [0.1]]
-    scSim.tank.nameOfMassState = "fuelTankMass"
-    scSim.tank.updateOnly = True
-    
-    for particle in scSim.particles:
-        scSim.tank.pushFuelSloshParticle(particle)
-        scObject.addStateEffector(particle)
         
-    scObject.addStateEffector(scSim.tank)
+        scSim.tankModel.propMassInit = 70.0
+        scSim.tank.setTankModel(scSim.tankModel)
+        scSim.tank.r_TB_B = [[0], [0], [0.1]]
+        scSim.tank.nameOfMassState = "fuelTankMass"
+        scSim.tank.updateOnly = True
+        
+        for particle in scSim.particles:
+            scSim.tank.pushFuelSloshParticle(particle)
+            scObject.addStateEffector(particle)
+            
+        scObject.addStateEffector(scSim.tank)
+
+    else:
+        scSim.tank = fuelTank.FuelTank()
+        scSim.tankModel = fuelTank.FuelTankModelConstantVolume()
+        scSim.tankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
+        scSim.tankModel.radiusTankInit = 0.5
+        scSim.tankModel.propMassInit = 100.0
+        
+        scSim.tank.setTankModel(scSim.tankModel)
+        scSim.tank.r_TB_B = [[0], [0], [0.1]]
+        scSim.tank.nameOfMassState = "fuelTankMass"
+        scSim.tank.updateOnly = True
+        
+        scObject.addStateEffector(scSim.tank)
 
     # --- 4. Navigation & Control ---
     scSim.sNavObject = simpleNav.SimpleNav()
@@ -302,7 +328,7 @@ def createScenario():
     scSim.rngControl.setDitherStd(0.01) 
     
     # 3. 모드 섞기 (데이터 다양성 확보)
-    mode_distribution = [0]*4 + [1]*1 + [2]*2 + [3]*1 + [4]*2
+    mode_distribution = [0]*4 + [1]*1 + [2]*1 + [3]*1 + [4]*1
     selected_mode = random.choice(mode_distribution)
     
     scSim.rngControl.setControlMode(int(selected_mode))
@@ -339,6 +365,11 @@ def createScenario():
     # 2. Control Torque Recorder
     scSim.msgRecList["rngControl.cmdTorqueOutMsg"] = scSim.rngControl.cmdTorqueOutMsg.recorder(logDtNano)
     scSim.AddModelToTask(logTaskName, scSim.msgRecList["rngControl.cmdTorqueOutMsg"])
+
+    # [Validation] Recorder for MPBM Internal States
+    if MC_VALIDATION and sloshingModel == "mpbm":
+        scSim.msgRecList["mpbm.mpbmOutMsg"] = scSim.mpbm.mpbmOutMsg.recorder(logDtNano)
+        scSim.AddModelToTask(logTaskName, scSim.msgRecList["mpbm.mpbmOutMsg"])
     
     # Store simulation time and sampling time for executeScenario
     scSim.simulationTime = simTimeNano
@@ -399,19 +430,33 @@ def run_single_retry():
     
     messages["rngControl.cmdTorqueOutMsg.torqueRequestBody"] = torque
     
+    # [Validation] Extract MPBM Internal States
+    if MC_VALIDATION and MC_SLOSHING_MODEL == "mpbm":
+        rec_mpbm = sim.msgRecList["mpbm.mpbmOutMsg"]
+        
+        # Extract vectors and add time column
+        r_slug = unitTestSupport.addTimeColumn(rec_mpbm.times(), rec_mpbm.r_BN_N)
+        v_slug = unitTestSupport.addTimeColumn(rec_mpbm.times(), rec_mpbm.v_BN_N)
+        torque_int = unitTestSupport.addTimeColumn(rec_mpbm.times(), rec_mpbm.omega_BN_B)
+        
+        messages["mpbm.mpbmOutMsg.r_BN_N"] = r_slug
+        messages["mpbm.mpbmOutMsg.v_BN_N"] = v_slug
+        messages["mpbm.mpbmOutMsg.omega_BN_B"] = torque_int
+
     return {"messages": messages}
 
-def run_mc_generation(*, numRuns: int, ctrlDt: float, logDt: float, simDt: float, simTime: float, numThreads: int = 4, useSloshing: bool = False):
+def run_mc_generation(*, numRuns: int, ctrlDt: float, logDt: float, simDt: float, simTime: float, numThreads: int = 4, sloshingModel: str = "none", validation: bool = False):
     # Suppress Basilisk INFO messages (only show WARNING and above)
     bskLogging.setDefaultLogLevel(bskLogging.BSK_WARNING)
     
     # Set global variables for createScenario (avoid functools.partial pickling issues)
-    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME, MC_USE_SLOSHING
+    global MC_CTRL_DT, MC_LOG_DT, MC_SIM_DT, MC_SIM_TIME, MC_SLOSHING_MODEL, MC_VALIDATION
     MC_CTRL_DT = ctrlDt
     MC_LOG_DT = logDt
     MC_SIM_DT = simDt
     MC_SIM_TIME = simTime
-    MC_USE_SLOSHING = useSloshing
+    MC_SLOSHING_MODEL = sloshingModel
+    MC_VALIDATION = validation
     
     # Setup directories
     experimentBaseDir = os.path.join("data", "experiments", fileName)
@@ -440,6 +485,9 @@ def run_mc_generation(*, numRuns: int, ctrlDt: float, logDt: float, simDt: float
     
     retentionPolicy.addMessageLog("attError.attGuidOutMsg", ["sigma_BR", "omega_BR_B"])
     retentionPolicy.addMessageLog("rngControl.cmdTorqueOutMsg", ["torqueRequestBody"])
+
+    if validation and sloshingModel == "mpbm":
+        retentionPolicy.addMessageLog("mpbm.mpbmOutMsg", ["r_BN_N", "v_BN_N", "omega_BN_B"])
     
     monteCarlo.addRetentionPolicy(retentionPolicy)
     
@@ -451,10 +499,17 @@ def run_mc_generation(*, numRuns: int, ctrlDt: float, logDt: float, simDt: float
         
     # Data Collection & HDF5 Saving
     ctrlSeqLen = int(round(simTime / ctrlDt))
-    if not useSloshing:
+    
+    # Filename format per request
+    if sloshingModel == "none":
         h5_filename = f"attitude_{numRuns}_{ctrlSeqLen}_{logDt}.h5"
+    elif sloshingModel == "mpbm":
+        h5_filename = f"mpbm_{numRuns}_{ctrlSeqLen}_{logDt}.h5"
+    elif sloshingModel == "spring":
+        h5_filename = f"spring_{numRuns}_{ctrlSeqLen}_{logDt}.h5"
     else:
-        h5_filename = f"sloshing_{numRuns}_{ctrlSeqLen}_{logDt}.h5"
+        h5_filename = f"{sloshingModel}_{numRuns}_{ctrlSeqLen}_{logDt}.h5"
+
     h5_path = os.path.join(rawBaseDir, h5_filename)
     
     print(f"Saving data to {h5_path}...")
@@ -510,6 +565,15 @@ def run_mc_generation(*, numRuns: int, ctrlDt: float, logDt: float, simDt: float
             # Save datasets
             grp_seq.create_dataset("state", data=state, dtype=np.float32)
             grp_seq.create_dataset("control_torque", data=torque, dtype=np.float32)
+
+            if validation and sloshingModel == "mpbm":
+                r_slug = data["messages"]["mpbm.mpbmOutMsg.r_BN_N"][:, 1:]
+                v_slug = data["messages"]["mpbm.mpbmOutMsg.v_BN_N"][:, 1:]
+                torque_int = data["messages"]["mpbm.mpbmOutMsg.omega_BN_B"][:, 1:]
+                
+                grp_seq.create_dataset("slug_position", data=r_slug, dtype=np.float32)
+                grp_seq.create_dataset("slug_velocity", data=v_slug, dtype=np.float32)
+                grp_seq.create_dataset("interaction_torque", data=torque_int, dtype=np.float32)
             
     print("Data generation complete.")
     
@@ -561,9 +625,16 @@ if __name__ == "__main__":
         help='Number of parallel threads for Monte Carlo execution'
     )
     parser.add_argument(
-        '--use-sloshing',
+        '--sloshing',
+        type=str,
+        default='none',
+        choices=['none', 'spring', 'mpbm'],
+        help='Sloshing model to use: none, spring, or mpbm (default: none)'
+    )
+    parser.add_argument(
+        '--validation',
         action='store_true',
-        help='Use sloshing disturbance'
+        help='Log internal states for validation (only for mpbm model)'
     )
     args = parser.parse_args()
     
@@ -575,6 +646,7 @@ if __name__ == "__main__":
     print(f"  - Simulation timestep: {args.sim_dt}s ")
     print(f"  - Simulation time: {args.sim_time}s")
     print(f"  - Parallel threads: {args.threads}")
+    print(f"  - Sloshing model: {args.sloshing}")
     print()
     
     run_mc_generation(
@@ -584,5 +656,6 @@ if __name__ == "__main__":
         simDt=args.sim_dt, 
         simTime=args.sim_time, 
         numThreads=args.threads,
-        useSloshing=args.use_sloshing
+        sloshingModel=args.sloshing,
+        validation=args.validation
     )
