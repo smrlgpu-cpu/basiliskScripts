@@ -213,7 +213,24 @@ def createScenario():
         scSim.mpbm.ModelTag = "mpbm"
         scSim.mpbm.massInit = 100.0
         scSim.mpbm.radiusTank = 0.5
-        scSim.mpbm.r_TB_B = [[0.0], [0.0], [0.1]]
+        # [Alignment] Tank Center = Body Center
+        scSim.mpbm.r_TB_B = [[0.0], [0.0], [0.0]]
+        
+        # [Random Initialization]
+        # Position: Inside tank (random direction, magnitude < 0.2m)
+        r_dir = np.random.normal(0, 1, 3)
+        r_dir /= np.linalg.norm(r_dir)
+        r_mag = np.random.uniform(0.0, 0.2)
+        r_init = r_dir * r_mag
+        scSim.mpbm.r_Init_B = [[r_init[0]], [r_init[1]], [r_init[2]]]
+        
+        # Velocity: Random velocity within [-0.1, 0.1] m/s
+        v_init = np.random.uniform(-0.1, 0.1, 3)
+        scSim.mpbm.v_Init_B = [[v_init[0]], [v_init[1]], [v_init[2]]]
+
+        # [Tuning] Reduce Interaction Torque
+        scSim.mpbm.kinematicViscosity = 1.0e-6 
+
         scObject.addStateEffector(scSim.mpbm)
         scSim.AddModelToTask(dynTaskName, scSim.mpbm)
     elif sloshingModel == "spring":
