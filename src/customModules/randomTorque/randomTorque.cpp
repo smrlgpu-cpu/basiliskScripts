@@ -2,7 +2,11 @@
 #include <iostream>
 #include <chrono>
 #include <cmath>
-#include <algorithm> // for std::min, std::max
+#include <algorithm> 
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 RandomTorque::RandomTorque()
 {
@@ -19,9 +23,22 @@ RandomTorque::RandomTorque()
     this->holdPeriodNs = 0;
     this->nextUpdateNs = 0;
     this->controlMode = MODE_UNIFORM;
-    this->ditherStd = 0.0;
-    this->ditherDist = std::normal_distribution<double>(0.0, 1.0);
+    
+    
     v3SetZero(this->currentFinalTorque);
+
+    // [Multisine 설정]
+    // Nyquist 0.5Hz (1.0s step) -> Max Freq 0.4Hz
+    this->numSineComponents = 10;
+    double minFreq = 0.01;
+    double maxFreq = 0.4; 
+    
+    this->sineFreqs.resize(this->numSineComponents);
+    for(int i=0; i<this->numSineComponents; ++i) {
+        double exponent = std::log10(minFreq) + (std::log10(maxFreq) - std::log10(minFreq)) * ((double)i / (double)(this->numSineComponents - 1));
+        this->sineFreqs[i] = std::pow(10.0, exponent);
+    }
+    this->sinePhases.resize(3, std::vector<double>(this->numSineComponents));
 }
 
 RandomTorque::~RandomTorque()
@@ -48,6 +65,13 @@ void RandomTorque::Reset(uint64_t CurrentSimNanos)
         }
     }
 
+    // Multisine 위상 랜덤화
+    for(int axis=0; axis<3; ++axis) {
+        for(int k=0; k<this->numSineComponents; ++k) {
+            this->sinePhases[axis][k] = this->dist(this->rng) * 2.0 * M_PI;
+        }
+    }
+
     this->nextUpdateNs = CurrentSimNanos; 
     v3SetZero(this->currentFinalTorque);
 
@@ -61,113 +85,55 @@ void RandomTorque::UpdateState(uint64_t CurrentSimNanos)
     CmdTorqueBodyMsgPayload outMsgBuffer;
     outMsgBuffer = this->cmdTorqueOutMsg.zeroMsgPayload;
 
-    // --- Retrieve Angular Velocity for Safety Rail ---
-    AttGuidMsgPayload guidMsg = {};
-    if (this->guidInMsg.isLinked()) {
-        guidMsg = this->guidInMsg();
-    }
+    bool timeToUpdate = (CurrentSimNanos >= this->nextUpdateNs);
 
-    // --- 1. Update Logic (Executed only when hold period expires) ---
-    if (this->holdPeriodNs == 0 || CurrentSimNanos >= this->nextUpdateNs) {
-        
+    if (timeToUpdate) {
+        double timeSec = CurrentSimNanos * 1.0e-9;
+
         for(int i=0; i<3; i++) {
             double val = 0.0;
-            double currentOmega = guidMsg.omega_BR_B[i];
-            double absOmega = std::abs(currentOmega);
             
-            // ================================================================
-            // Safety Rail Logic: Gradual Distribution (0.3 rad/s)
-            // ================================================================
-            if (absOmega > 0.2) {
+            if (this->controlMode == MODE_MULTISINE) { // Mode 1
+                for(int k=0; k<this->numSineComponents; ++k) {
+                    double freq = this->sineFreqs[k];
+                    double phase = this->sinePhases[i][k];
+                    val += std::sin(2.0 * M_PI * freq * timeSec + phase);
+                }
+                val = (val / (double)this->numSineComponents) * this->torqueMagnitude * 2.0;
                 
-                // 1. Calculate Mixing Factor alpha [0.0 ~ 1.0]
-                // 0.2 rad/s -> alpha = 0.0 (No Shift)
-                // 0.3 rad/s -> alpha = 1.0 (Max Shift)
-                double alpha = (absOmega - 0.2) / (0.3 - 0.2);
-                if (alpha > 1.0) alpha = 1.0;
-
-                double randVal = this->dist(this->rng); // [0.0, 1.0]
-                double minScale, maxScale;
-
-                // 2. Interpolate Torque Range based on alpha
-                if (currentOmega > 0) {
-                    // [Positive Spin] -> We want Negative Torque (Braking)
-                    // Normal: [-1.0, 1.0]
-                    // Target: [-1.0, 0.2] (Shift upper bound down)
-                    
-                    double targetMax = 0.2;
-                    double normalMax = 1.0;
-                    
-                    minScale = -1.0; 
-                    // Gradually reduce the maximum acceleration torque allowed
-                    maxScale = normalMax - alpha * (normalMax - targetMax); 
-                } 
-                else {
-                    // [Negative Spin] -> We want Positive Torque (Braking)
-                    // Normal: [-1.0, 1.0]
-                    // Target: [-0.2, 1.0] (Shift lower bound up)
-                    
-                    double targetMin = -0.2;
-                    double normalMin = -1.0;
-                    
-                    // Gradually increase the minimum acceleration torque allowed
-                    minScale = normalMin + alpha * (targetMin - normalMin);
-                    maxScale = 1.0;
-                }
-
-                // 3. Sample from the interpolated biased distribution
-                double scale = minScale + (maxScale - minScale) * randVal;
-                val = scale * this->torqueMagnitude;
-            } 
-            else {
-                // ================================================================
-                // Normal Random Control Modes (Safe Region: < 0.2 rad/s)
-                // ================================================================
-                double randVal = this->dist(this->rng); 
-
-                if (this->controlMode == MODE_SATURATION) { 
-                    double sign = (randVal >= 0.5) ? 1.0 : -1.0;
-                    double randMag = this->dist(this->rng); 
-                    double magScale = 0.95 + (randMag * 0.05); 
-                    val = sign * magScale * this->torqueMagnitude;
-                    
-                } else if (this->controlMode == MODE_LOW) {
-                    double normalized = (randVal * 2.0) - 1.0; 
-                    val = normalized * 0.2 * this->torqueMagnitude;
-                    
-                } else if (this->controlMode == MODE_MEDIUM) {
-                    double sign = (randVal >= 0.5) ? 1.0 : -1.0;
-                    double randMag = this->dist(this->rng);
-                    double magScale = 0.5 + (randMag * 0.3); 
-                    val = sign * magScale * this->torqueMagnitude;
-
-                } else if (this->controlMode == MODE_ULTRA_LOW) {
-                    double normalized = (randVal * 2.0) - 1.0; 
-                    val = normalized * 0.005 * this->torqueMagnitude;
-
-                } else { // MODE_UNIFORM
-                    double normalized = (randVal * 2.0) - 1.0;
-                    val = normalized * this->torqueMagnitude;
-                }
+                if(val > this->torqueMagnitude) val = this->torqueMagnitude;
+                if(val < -this->torqueMagnitude) val = -this->torqueMagnitude;
+                
+            } else if (this->controlMode == MODE_APRBS) { // Mode 2
+                double randVal = this->dist(this->rng);
+                val = ((randVal * 2.0) - 1.0) * this->torqueMagnitude;
+                
+            } else { // MODE_UNIFORM (Mode 0)
+                double randVal = this->dist(this->rng);
+                val = ((randVal * 2.0) - 1.0) * this->torqueMagnitude;
             }
-            
-            // --- 2. Apply Dithering Here (Synchronized with Control Update) ---
-            double noise = 0.0;
-            if (this->ditherStd > 0.0) {
-                noise = this->ditherDist(this->rng) * this->ditherStd;
-            }
-            
-            this->currentFinalTorque[i] = val + noise;
+
+            this->currentFinalTorque[i] = val;
         }
 
-        // Schedule next update
-        if (this->holdPeriodNs > 0) {
-            this->nextUpdateNs = CurrentSimNanos + this->holdPeriodNs;
+        if (this->controlMode == MODE_APRBS) {
+            std::uniform_int_distribution<int> stepDist(1, 4);
+            int randomSteps = stepDist(this->rng); 
+            uint64_t variableHold = this->holdPeriodNs * randomSteps;
+            if (variableHold < this->holdPeriodNs) variableHold = this->holdPeriodNs;
+            this->nextUpdateNs = CurrentSimNanos + variableHold;
+        } 
+        else {
+            uint64_t period = (this->holdPeriodNs > 0) ? this->holdPeriodNs : 100000000; 
+            this->nextUpdateNs = CurrentSimNanos + period;
         }
     }
+    
+    // [출력]
+    for(int i=0; i<3; i++) {
+        outMsgBuffer.torqueRequestBody[i] = this->currentFinalTorque[i];
+    }
 
-    // --- 3. Output the Held Torque ---
-    v3Copy(this->currentFinalTorque, outMsgBuffer.torqueRequestBody);
     this->cmdTorqueOutMsg.write(&outMsgBuffer, this->moduleID, CurrentSimNanos);
 }
 
@@ -192,11 +158,6 @@ void RandomTorque::setHoldPeriod(double seconds) {
     }
 }
 
-void RandomTorque::setDitherStd(double value) {
-    if (value >= 0) {
-        this->ditherStd = value;
-    }
-}
 
 void RandomTorque::setControlMode(int mode) {
     this->controlMode = mode;

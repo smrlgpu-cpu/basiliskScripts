@@ -9,7 +9,7 @@
 #include <string>
 
 // [Validation] Payload for logging hidden states
-#include "architecture/msgPayloadDefC/SCStatesMsgPayload.h"
+#include "msgPayloadDefC/MPBMStateMsgPayload.h"
 #include "architecture/messaging/messaging.h"
 
 class MovingPulsatingBall : public StateEffector, public SysModel {
@@ -28,7 +28,7 @@ public:
 
 public:
     // [Validation] Output Message for logging (r_slug, v_slug, T_interaction)
-    Message<SCStatesMsgPayload> mpbmOutMsg;
+    Message<MPBMStateMsgPayload> mpbmOutMsg;
 
     // Parameters for 500kg Sat / 100kg Fuel
     double massInit;            //!< [kg] m_s: Fuel mass

@@ -12,14 +12,14 @@
 #include "architecture/utilities/linearAlgebra.h"
 
 #include <random>
+#include <vector>
+#include <cmath>
 
-// Control Mode Definitions
+// [수정] 모드 인덱스 재정의 (0, 1, 2)
 enum TorqueMode {
-    MODE_UNIFORM = 0,    // Random values in [-Mag, +Mag]
-    MODE_SATURATION = 1, // Random values in [-Mag, -0.95*Mag] U [+0.95*Mag, +Mag]
-    MODE_LOW = 2,        // Random values in [-0.2*Mag, +0.2*Mag]
-    MODE_MEDIUM = 3,      // Random values in [-0.8*Mag, -0.5*Mag] U [+0.5*Mag, +0.8*Mag]
-    MODE_ULTRA_LOW = 4   // Random values in [-0.005*Mag, +0.005*Mag]
+    MODE_UNIFORM = 0,    // Standard Random Step [-Mag, +Mag] (Fixed Hold)
+    MODE_MULTISINE = 1,  // Randomized Phase Multisine (Fixed Hold, <0.4Hz)
+    MODE_APRBS = 2       // Variable Amplitude & Variable Hold Time
 };
 
 /*! @brief Random torque generator module */
@@ -45,8 +45,7 @@ public:
     void setSeed(unsigned int value);
     unsigned int getSeed() const {return this->seed;}
 
-    void setHoldPeriod(double seconds);
-    void setDitherStd(double value);
+    void setHoldPeriod(double seconds); // Used as base period
     void setControlMode(int mode);
 
 private:
@@ -61,9 +60,13 @@ private:
     
     double currentFinalTorque[3]; 
     
-    double ditherStd;
     int controlMode;
-    std::normal_distribution<double> ditherDist;
+
+    // --- Multisine Parameters ---
+    int numSineComponents;
+    std::vector<double> sineFreqs;      
+    std::vector<std::vector<double>> sinePhases; // [3 axes][components]
+    
 };
 
 #endif

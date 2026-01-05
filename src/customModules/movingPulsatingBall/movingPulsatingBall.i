@@ -1,7 +1,7 @@
 %module movingPulsatingBall
 %{
 #include "movingPulsatingBall.h"
-#include "architecture/msgPayloadDefC/SCStatesMsgPayload.h"
+#include "msgPayloadDefC/MPBMStateMsgPayload.h"
 %}
 
 %include "swig_conly_data.i"
@@ -14,8 +14,8 @@
 %include "simulation/dynamics/_GeneralModuleFiles/stateEffector.h"
 
 // 메시지 페이로드 정의
-%include "architecture/msgPayloadDefC/SCStatesMsgPayload.h"
-struct SCStatesMsg_C;
+%include "msgPayloadDefC/MPBMStateMsgPayload.h"
+struct MPBMOutMsg;
 
 // 해당 모듈 헤더
 %include "movingPulsatingBall.h"
