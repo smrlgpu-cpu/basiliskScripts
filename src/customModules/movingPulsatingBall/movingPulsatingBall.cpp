@@ -189,7 +189,7 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
       double penetration = 0.10 - L;
       barrier_force += 100.0 * penetration; 
       
-      N_val_raw -= barrier_force;
+      N_val_raw += barrier_force;
    }
    
    // Friction Force
@@ -210,7 +210,6 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
    // =========================================================================
    // Soft Saturation (Tanh)
    // Simulates "Yielding" of fluid/baffles. 
-   // Smooth gradients for RL, realistic limits for RW.
    // =========================================================================
 
    // 1. Soft Saturate Torque -> Limit to ~2.0 Nm
