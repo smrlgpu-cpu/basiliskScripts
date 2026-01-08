@@ -35,8 +35,8 @@ public:
     double radiusTank;          //!< [m] R: Tank radius
     double radiusSlugMin;       //!< [m] L_min: Frozen limit
     double kinematicViscosity;  //!< [m^2/s] Viscosity (Hydrazine)
+    double rhoFluid;            //!< [kg/m^3] Fluid Density
     double surfaceTension;      //!< [N/m] Surface tension
-    double rho;                 //!< [kg/m^3] Density
     double t_sr;                //!< [-] Circulation factor
     
     // Penalty Parameters (Soft Barrier)
