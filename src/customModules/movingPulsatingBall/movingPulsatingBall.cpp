@@ -78,12 +78,16 @@ void MovingPulsatingBall::updateEffectorMassProps(double integTime) {
     double r_norm = r_rel.norm();
     
     // Drift Correction (Corrected variable names)
-    if (r_norm > this->radiusTank - 1e-5) {
-       r_norm = this->radiusTank - 1e-5;
+    if (r_norm > this->radiusTank - 1e-4) {
+       r_norm = this->radiusTank - 1e-4;
        r_rel = r_rel.normalized() * r_norm;
        
        double v_radial = v_rel.dot(r_rel.normalized());
        if (v_radial > 0) v_rel -= v_radial * r_rel.normalized();
+
+       // Force update the state to prevent drift accumulation
+       this->posState->setState(r_rel);
+       this->velState->setState(v_rel);
     }
     
     this->currentSlugRadius = this->radiusTank - r_norm;
