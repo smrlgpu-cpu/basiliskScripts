@@ -1,17 +1,31 @@
 import os
 import h5py
 import numpy as np
+import argparse
 from Basilisk.utilities import RigidBodyKinematics as rbk
 import scripts.dataGeneration as dg
 
-# Configuration matching the failed run
-NUM_RUNS = 50000
-CTRL_DT = 1.0
-LOG_DT = 0.1
-SIM_DT = 0.0001
-SIM_TIME = 150.0
-SLOSHING_MODEL = "mpbm"
-VALIDATION = False
+# Configure argument parser
+parser = argparse.ArgumentParser(description="Patch HDF5 data by re-running failed simulations.")
+
+parser.add_argument("--num-runs", type=int, default=50000, help="Number of runs (default: 50000)")
+parser.add_argument("--ctrl-dt", type=float, default=1.0, help="Control time step (default: 1.0)")
+parser.add_argument("--log-dt", type=float, default=0.1, help="Logging time step (default: 0.1)")
+parser.add_argument("--sim-dt", type=float, default=0.0001, help="Simulation time step (default: 0.0001)")
+parser.add_argument("--sim-time", type=float, default=200.0, help="Simulation duration (default: 200.0)")
+parser.add_argument("--sloshing-model", type=str, default="mpbm", help="Sloshing model name (default: mpbm)")
+parser.add_argument("--validation", action="store_true", help="Enable validation mode (default: False)")
+
+args = parser.parse_args()
+
+# Configuration from arguments
+NUM_RUNS = args.num_runs
+CTRL_DT = args.ctrl_dt
+LOG_DT = args.log_dt
+SIM_DT = args.sim_dt
+SIM_TIME = args.sim_time
+SLOSHING_MODEL = args.sloshing_model
+VALIDATION = args.validation
 
 # Set global variables in the dataGeneration module
 dg.MC_CTRL_DT = CTRL_DT
