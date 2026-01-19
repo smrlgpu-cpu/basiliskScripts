@@ -298,17 +298,6 @@ def createScenario():
     # 1초 ZOH 주기 설정
     scSim.rngControl.setHoldPeriod(MC_CTRL_DT) 
     
-    # [수정된 모드 선택 로직]
-    # 0: Uniform (Random Step)
-    # 1: Multisine (Discrete)
-    # 2: APRBS (Variable Hold)
-    mode_distribution = [0, 1, 2] 
-    mode_weights = [70, 10, 20]
-    selected_mode = random.choices([0, 1, 2], weights=mode_weights, k=1)[0]
-    
-    
-    scSim.rngControl.setControlMode(int(selected_mode))
-    
     scSim.AddModelToTask(ctrlTaskName, scSim.rngControl)
     
     scSim.vehicleConfigOut = messaging.VehicleConfigMsgPayload(ISCPntB_B=I)

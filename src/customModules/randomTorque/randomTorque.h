@@ -15,13 +15,6 @@
 #include <vector>
 #include <cmath>
 
-// [수정] 모드 인덱스 재정의 (0, 1, 2)
-enum TorqueMode {
-    MODE_UNIFORM = 0,    // Standard Random Step [-Mag, +Mag] (Fixed Hold)
-    MODE_MULTISINE = 1,  // Randomized Phase Multisine (Fixed Hold, <0.4Hz)
-    MODE_APRBS = 2       // Variable Amplitude & Variable Hold Time
-};
-
 /*! @brief Random torque generator module */
 class RandomTorque: public SysModel {
 public:
@@ -46,7 +39,6 @@ public:
     unsigned int getSeed() const {return this->seed;}
 
     void setHoldPeriod(double seconds); // Used as base period
-    void setControlMode(int mode);
 
 private:
     double torqueMagnitude = 0.01;
@@ -59,14 +51,6 @@ private:
     uint64_t nextUpdateNs;
     
     double currentFinalTorque[3]; 
-    
-    int controlMode;
-
-    // --- Multisine Parameters ---
-    int numSineComponents;
-    std::vector<double> sineFreqs;      
-    std::vector<std::vector<double>> sinePhases; // [3 axes][components]
-    
 };
 
 #endif
