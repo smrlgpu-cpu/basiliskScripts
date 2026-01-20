@@ -37,6 +37,7 @@ MovingPulsatingBall::MovingPulsatingBall() {
     this->r_TB_B.setZero();
     this->r_Init_B << 0.0, 0.0, 0.1;
     this->v_Init_B.setZero();
+    this->omega_Init_B.setZero();
     
     this->nameOfPosState = "mpbmPos";
     this->nameOfVelState = "mpbmVel";
@@ -60,13 +61,12 @@ void MovingPulsatingBall::Reset(uint64_t CurrentSimNanos) {
 }
 
 void MovingPulsatingBall::registerStates(DynParamManager& states) {
-    Eigen::Vector3d initOmega; initOmega.setZero();
     this->posState = states.registerState(3, 1, this->nameOfPosState);
     this->posState->setState(this->r_Init_B);
     this->velState = states.registerState(3, 1, this->nameOfVelState);
     this->velState->setState(this->v_Init_B);
     this->omegaState = states.registerState(3, 1, this->nameOfOmegaState);
-    this->omegaState->setState(initOmega);
+    this->omegaState->setState(this->omega_Init_B);
 }
 
 void MovingPulsatingBall::linkInStates(DynParamManager& states) {}
@@ -76,16 +76,24 @@ void MovingPulsatingBall::updateEffectorMassProps(double integTime) {
     Eigen::Vector3d v_rel = this->velState->getState();
     
     double r_norm = r_rel.norm();
+    double maxCenterRadius = this->radiusTank - this->radiusSlugMin;
     
-    // Drift Correction (Corrected variable names)
-    if (r_norm > this->radiusTank - 1e-4) {
-       r_norm = this->radiusTank - 1e-4;
-       r_rel = r_rel.normalized() * r_norm;
+    // Wall correction: Impulse-based collision response with energy loss
+    if (r_norm > maxCenterRadius) {
+       Eigen::Vector3d n_hat = r_rel.normalized();
        
-       double v_radial = v_rel.dot(r_rel.normalized());
-       if (v_radial > 0) v_rel -= v_radial * r_rel.normalized();
+       // 1. Position Clamping to prevent tunneling
+       r_norm = maxCenterRadius;
+       r_rel = n_hat * r_norm;
+       
+       // 2. Velocity Reflection
+       double v_radial = v_rel.dot(n_hat);
+       if (v_radial > 0) { 
+           // Coefficient of Restitution e = 0.5 (Energy dissipation)
+           // v_new = v_old - (1 + e) * v_radial * n_hat
+           v_rel -= 1.5 * v_radial * n_hat;
+       }
 
-       // Force update the state to prevent drift accumulation
        this->posState->setState(r_rel);
        this->velState->setState(v_rel);
     }
@@ -138,16 +146,13 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
     double L = this->radiusTank - r_norm;
     Eigen::Vector3d e_i = r_vec.normalized();
     double r_dot_scalar = r_vec.dot(v_vec) / r_norm;
-    double L_calc = (L < 0.01) ? 0.01 : L;
-
-    // Physical Properties (2025 IEEE TAES: Fixed Density)
-    double mu_fluid = this->kinematicViscosity * this->rhoFluid; 
+    double L_calc = (L < this->radiusSlugMin) ? this->radiusSlugMin : L;
 
     // Kinematics
     Eigen::Vector3d w_i = e_i.cross(v_vec) / r_norm;
     Eigen::Vector3d omega_ri = e_i.dot(omega_s) * e_i;
 
-    // Raw Forces
+    // Raw Forces (Normal Force N)
     Eigen::Vector3d term1_vec = e_i.cross(omega_hub + w_i);
     double term1 = r_norm * term1_vec.squaredNorm();
     double term2 = (omega_hub.cross(this->r_TB_B)).dot(omega_hub.cross(e_i));
@@ -158,48 +163,27 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
     
     double N_val_raw = (3.0 * this->massInit / 8.0) * (term1 + term2 + term3) + term4 + term5;
 
-    // Viscous Wall & Barrier Force
-    double barrier_force = 0.0;
-    
-    if (L < 0.02) { 
-       double dist = (L < 0.001) ? 0.001 : L;
-       double speed_out = r_dot_scalar; 
-       
-       if (speed_out > 0) {
-          double c_mud = 100.0 / dist;
-          if (c_mud > 1e6) c_mud = 1e6;
-          barrier_force += c_mud * speed_out;
-       }
-       
-       double penetration = 0.02 - L; 
-       if (penetration > 0) {
-           barrier_force += 100.0 * penetration; 
-       }
-       
-       N_val_raw += barrier_force;
-    }
-    
-    // Friction Force (2025 IEEE TAES: Coeff 6500)
+    // Friction Force (F_b)
     double coef_F = (6500.0 * this->kinematicViscosity * this->massInit) / (L_calc * L_calc);
     Eigen::Vector3d inner_vec = e_i.cross(v_vec) + L_calc * omega_s;
     Eigen::Vector3d F_bi_raw = -coef_F * e_i.cross(inner_vec);
     
-    // Interaction Torque (2025 IEEE TAES: Fixed Density)
+    // Interaction Torque (T_L)
     double omega_s_norm = omega_s.norm();
     if(omega_s_norm < 1e-8) omega_s_norm = 1e-8;
 
     double f_ac = 0.36 * std::pow(this->massInit, 4.0/3.0) 
-                * std::pow(this->rhoFluid, 1.0/6.0)     // Using Fixed Density
-                * std::sqrt(mu_fluid)                   
+                * std::pow(this->rhoFluid, 1.0/6.0) 
+                * std::sqrt(this->kinematicViscosity) 
                 * std::pow(L_calc / this->radiusSlugMin, 2.0) 
                 * std::sqrt(omega_s_norm);
     
     Eigen::Vector3d T_Li_raw = f_ac * (this->t_sr * omega_ri + (1.0 - this->t_sr)*(omega_s - omega_ri));
 
-    // Soft Saturation
-    Eigen::Vector3d T_Li_Physical = softSaturate(T_Li_raw, 2.0);
-    Eigen::Vector3d F_bi_Physical = softSaturate(F_bi_raw, 20.0);
-    double N_val_Physical = 50.0 * std::tanh(N_val_raw / 50.0);
+    // Soft Saturation (Increased limits for physical realism)
+    Eigen::Vector3d T_Li_Physical = softSaturate(T_Li_raw, 10.0);
+    Eigen::Vector3d F_bi_Physical = softSaturate(F_bi_raw, 100.0);
+    double N_val_Physical = 1000.0 * std::tanh(N_val_raw / 1000.0);
 
     Eigen::Vector3d F_Li_Physical = N_val_Physical * e_i + F_bi_Physical;
 
@@ -212,13 +196,6 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
     
     Eigen::Vector3d v_dot = (-F_Li_Physical / this->massInit) - inertial_acc;
     
-    if (L < -0.001) {
-       double v_radial = v_vec.dot(e_i);
-       if (v_radial > 0) v_dot -= 2000.0 * v_radial * e_i;
-    }
-    
-    v_dot -= 0.1 * v_vec;
-
     double I_s = 0.4 * this->massInit * L_calc * L_calc;
     if (I_s < 1e-6) I_s = 1e-6;
 
@@ -233,8 +210,6 @@ void MovingPulsatingBall::computeDerivatives(double integTime, Eigen::Vector3d r
     if (omega_s_dot_norm > 100.0) {
        omega_s_dot = omega_s_dot * (100.0 / omega_s_dot_norm);
     }
-
-    omega_s_dot -= 0.5 * omega_s; 
 
     this->posState->setDerivative(v_vec);
     this->velState->setDerivative(v_dot);

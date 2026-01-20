@@ -48,6 +48,7 @@ public:
     // [Init] Random Initialization Support
     Eigen::Vector3d r_Init_B;   //!< Initial Position
     Eigen::Vector3d v_Init_B;   //!< Initial Velocity
+    Eigen::Vector3d omega_Init_B; //!< Initial Angular Velocity of the Ball
 
     std::string nameOfPosState;   
     std::string nameOfVelState;   

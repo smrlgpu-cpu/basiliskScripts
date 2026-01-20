@@ -228,8 +228,10 @@ def createScenario():
         v_init = np.random.uniform(-0.1, 0.1, 3)
         scSim.mpbm.v_Init_B = [[v_init[0]], [v_init[1]], [v_init[2]]]
 
-        # [Tuning] Reduce Interaction Torque
-        scSim.mpbm.kinematicViscosity = 1.0e-6 
+        # Omega: Random angular velocity within [-0.2, 0.2] rad/s
+        # This ensures initial spin/tumble exists in all axes including Z
+        omega_init = np.random.uniform(-0.2, 0.2, 3)
+        scSim.mpbm.omega_Init_B = [[omega_init[0]], [omega_init[1]], [omega_init[2]]]
 
         scObject.addStateEffector(scSim.mpbm)
         scSim.AddModelToTask(dynTaskName, scSim.mpbm)
@@ -407,8 +409,7 @@ def run_mc_generation(*, numRuns: int, ctrlDt: float, logDt: float, simDt: float
     if failures:
         print(f"Failed runs reported by MC controller: {failures}")
         
-    ctrlSeqLen = int(round(simTime / ctrlDt))
-    h5_filename = f"{sloshingModel}_{numRuns}_{ctrlSeqLen}_{logDt}.h5" if sloshingModel != "none" else f"attitude_{numRuns}_{ctrlSeqLen}_{logDt}.h5"
+    h5_filename = f"{sloshingModel}_{numRuns}_{simTime}_{logDt}.h5" if sloshingModel != "none" else f"attitude_{numRuns}_{simTime}_{logDt}.h5"
     h5_path = os.path.join(rawBaseDir, h5_filename)
     
     print(f"Saving data to {h5_path}...")
